@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local configuration & secrets
+.env
+*.env
+credentials.json
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs & temp
+*.log
+
