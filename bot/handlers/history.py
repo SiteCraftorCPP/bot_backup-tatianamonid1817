@@ -27,11 +27,13 @@ def _user_visible_status(status: str) -> str:
 COLORS = ["🟢", "🟠", "🔵", "🟣", "🟡", "🟤", "🔴", "⚫", "⚪"]
 
 
-def _user_key(telegram_id: int | None, username: str | None) -> tuple:
-    """Стабильный ключ пользователя для маппинга цветов."""
-    tid = telegram_id or 0
-    uname = (username or "").strip().lower()
-    return (tid, uname)
+def _user_key(telegram_id: int | None, username: str | None) -> int:
+    """Стабильный ключ пользователя для маппинга цветов.
+
+    Цвет жёстко привязан к telegram_id, username на цвет не влияет.
+    Один и тот же tid → один и тот же цвет во всех местах.
+    """
+    return int(telegram_id or 0)
 
 
 def _admin_color_label(
@@ -85,25 +87,24 @@ def _build_user_color_mapping(
     orders: list[dict],
     admins_tuples: list[tuple[int | None, str]],
 ) -> tuple[dict, list[str]]:
-    """Строит стабильный маппинг (tid, username) -> индекс цвета.
+    """Строит стабильный маппинг tid -> индекс цвета.
     Сначала все админы в фиксированном порядке, затем ответственные из заявок (не админы).
     Один и тот же пользователь всегда получает один и тот же цвет при любом фильтре/пагинации.
     """
-    responsibles = set()
+    responsibles: set[int] = set()
     for o in orders:
         tid = o.get("responsible_telegram_id")
-        uname = (o.get("responsible_username") or "").strip()
-        if tid or uname:
-            responsibles.add(_user_key(tid, uname))
-    admins_set = {_user_key(tid, uname) for tid, uname in admins_tuples}
-    all_users: list[tuple] = []
-    seen: set[tuple] = set()
+        if tid:
+            responsibles.add(_user_key(tid, o.get("responsible_username")))
+    admins_set: set[int] = {_user_key(tid, uname) for tid, uname in admins_tuples}
+    all_users: list[int] = []
+    seen: set[int] = set()
     for tid, uname in admins_tuples:
         k = _user_key(tid, uname)
         if k not in seen:
             seen.add(k)
             all_users.append(k)
-    for k in sorted(responsibles - admins_set, key=lambda u: (u[1] or "", str(u[0]))):
+    for k in sorted(responsibles - admins_set):
         if k not in seen:
             seen.add(k)
             all_users.append(k)
