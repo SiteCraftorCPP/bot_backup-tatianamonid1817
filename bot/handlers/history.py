@@ -24,73 +24,81 @@ def _user_visible_status(status: str) -> str:
     return status
 
 
-COLORS = ["🟢", "🟠", "🔵", "🟣", "🟡", "🟤"]
+COLORS = ["🟢", "🟠", "🔵", "🟣", "🟡", "🟤", "🔴", "⚫", "⚪"]
 
 
-def _admin_color_label(telegram_id: int | None, username: str | None) -> str:
-    """Вернуть цветной кружок + username/id для администратора."""
+def _user_key(telegram_id: int | None, username: str | None) -> tuple:
+    """Стабильный ключ пользователя для маппинга цветов."""
+    tid = telegram_id or 0
+    uname = (username or "").strip().lower()
+    return (tid, uname)
+
+
+def _admin_color_label(
+    telegram_id: int | None,
+    username: str | None,
+    user_to_index: dict | None = None,
+) -> str:
+    """Цветной кружок + username/id. Если передан user_to_index — цвет уникален для пользователя."""
     if not telegram_id and not username:
         return ""
-    # Ключ для цвета: в первую очередь username, чтобы везде было одинаково,
-    # даже если где-то нет telegram_id; иначе используем сам id.
-    if username:
-        key = username.lower()
+    main = f"@{username}" if username else str(telegram_id or "")
+    if user_to_index is not None:
+        key = _user_key(telegram_id, username)
+        idx = user_to_index.get(key, 0)
+        color = COLORS[idx % len(COLORS)]
     else:
-        key = str(telegram_id or "")
-    color = COLORS[hash(key) % len(COLORS)]
-    main = f"@{username}" if username else key
+        key = (username or "").lower() or str(telegram_id or "")
+        color = COLORS[hash(key) % len(COLORS)]
     return f"{color} {main}"
 
 
-async def _load_admin_filters() -> list[str]:
-    """Полный список текущих админов проекта (ADMIN_IDS + role=admin в БД).
-
-    Для кнопки показываем username (user в телеге), если он есть, иначе id.
-    Возвращаем список меток для отображения.
-    """
+async def _load_admins_tuples() -> list[tuple[int | None, str]]:
+    """Список админов как (telegram_id, username) в стабильном порядке."""
     settings = get_settings()
-
-    # все id из ENV
     cfg_ids: set[int] = set(settings.admin_ids_list)
-
-    # ключ: str(telegram_id), значение: username или ""
     admins: dict[str, str] = {}
-
-    # 1) админы из БД (users с role='admin')
     try:
         admins_db = await list_admins()
     except Exception:  # noqa: BLE001
         admins_db = []
-
     for a in admins_db or []:
         try:
             tid = int(a.get("telegram_id"))
         except (TypeError, ValueError):
             continue
-        key = str(tid)
-        username = (a.get("username") or "").strip()
-        admins[key] = username
+        admins[str(tid)] = (a.get("username") or "").strip()
         cfg_ids.discard(tid)
-
-    # 2) админы только из ENV, которых ещё нет в словаре
     for tid in cfg_ids:
-        key = str(tid)
         username = ""
         try:
             u = await get_user(tid)
+            if u:
+                username = (u.get("username") or "").strip()
         except Exception:  # noqa: BLE001
-            u = None
-        if u:
-            username = (u.get("username") or "").strip()
-        admins.setdefault(key, username)
+            pass
+        admins.setdefault(str(tid), username)
+    return [(int(k) if k.isdigit() else None, admins[k]) for k in sorted(admins.keys(), key=lambda x: (admins[x].lower(), x))]
 
-    # 3) превращаем в подписи для кнопок с авто-раскраской
-    filters: list[str] = []
-    for key, username in admins.items():
-        tid = int(key) if key.isdigit() else None
-        label = _admin_color_label(tid, username)
-        filters.append(label)
-    return filters
+
+def _build_user_color_mapping(
+    orders: list[dict],
+    admins_tuples: list[tuple[int | None, str]],
+) -> tuple[dict, list[str]]:
+    """По заявкам и списку админов строит маппинг (tid, username) -> индекс цвета и список подписей админов.
+    Каждому уникальному пользователю — свой цвет (без дублей).
+    """
+    responsibles = set()
+    for o in orders:
+        tid = o.get("responsible_telegram_id")
+        uname = (o.get("responsible_username") or "").strip()
+        if tid or uname:
+            responsibles.add(_user_key(tid, uname))
+    admins_set = {_user_key(tid, uname) for tid, uname in admins_tuples}
+    all_users = sorted(admins_set | responsibles, key=lambda u: (u[1] or "", str(u[0])))
+    user_to_index = {u: i for i, u in enumerate(all_users)}
+    admin_labels = [_admin_color_label(tid, uname, user_to_index) for tid, uname in admins_tuples]
+    return user_to_index, admin_labels
 
 
 @router.message(F.text == "📜 История заявок")
@@ -110,15 +118,15 @@ async def history_orders(message: Message, state: FSMContext):
         await message.answer("Заявок пока нет.")
         return
 
+    admins_tuples = await _load_admins_tuples()
+    user_to_index, admin_labels = _build_user_color_mapping(orders, admins_tuples)
+
     def _status_with_responsible(o: dict) -> str:
         resp = o.get("responsible_username") or ""
         if not resp:
             return f"{o['status']}"
-        label = _admin_color_label(o.get("responsible_telegram_id"), resp)
+        label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
         return f"{o['status']} — {label}"
-
-    # Ряд с юзернеймами всех админов проекта под фильтрами статуса.
-    admin_labels = await _load_admin_filters()
 
     items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
     has_next = len(orders) > ORDERS_PER_PAGE
@@ -141,6 +149,7 @@ async def history_orders(message: Message, state: FSMContext):
         mode="history",
         status_filter=None,
         admin_filter=None,
+        admin_labels=admin_labels,
     )
 
 
@@ -163,7 +172,8 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                 await callback.answer("Доступ запрещён.", show_alert=True)
                 return
             orders = await get_orders(admin=True, status=status, limit=100)
-            admin_labels = await _load_admin_filters()
+            admins_tuples = await _load_admins_tuples()
+            user_to_index, admin_labels = _build_user_color_mapping(orders, admins_tuples)
 
             if not orders:
                 await callback.message.edit_text(
@@ -184,7 +194,7 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                     resp = o.get("responsible_username") or ""
                     if not resp:
                         return f"{o['status']}"
-                    label = _admin_color_label(o.get("responsible_telegram_id"), resp)
+                    label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
                     return f"{o['status']} — {label}"
 
                 items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
@@ -209,6 +219,7 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                 mode="history",
                 status_filter=status_key,
                 admin_filter=None,
+                admin_labels=admin_labels,
             )
         # Фильтр для «Моих заявок» (пользователь или админ)
         else:

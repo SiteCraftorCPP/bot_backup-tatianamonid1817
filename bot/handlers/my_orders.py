@@ -255,118 +255,18 @@ async def order_select(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "ord_back")
 async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
-    """Back from filtered orders list to full list (без фильтра)."""
+    """Кнопка «Назад» из списка заявок — возврат в главное меню (не смена фильтра)."""
     if not callback.from_user:
         await callback.answer("Ошибка.", show_alert=True)
         return
-
-    data = await state.get_data()
-    mode = data.get("mode", "my")
-    user_id = callback.from_user.id
-
-    try:
-        if mode == "history":
-            # Полная история заявок для админа (без фильтра).
-            from bot.handlers.main_menu import is_admin as _is_admin
-
-            if not await _is_admin(user_id):
-                await callback.answer("Доступ запрещён.", show_alert=True)
-                return
-            orders = await get_orders(admin=True, limit=100)
-            if not orders:
-                await callback.message.edit_text(
-                    "==================================================\nИстория заявок:\n\nЗаявок пока нет.",
-                    reply_markup=orders_list_inline(
-                        [],
-                        page=0,
-                        has_next=False,
-                        prefix="ord",
-                        show_filters=True,
-                        current_filter=None,
-                        filter_mode="history",
-                    ),
-                )
-            else:
-                def _status_with_responsible(o: dict) -> str:
-                    resp = o.get("responsible_username") or ""
-                    if not resp:
-                        resp = ""
-                    else:
-                        resp = f" — {resp}"
-                    return f"{o['status']}{resp}"
-
-                items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
-                has_next = len(orders) > ORDERS_PER_PAGE
-                await callback.message.edit_text(
-                    "==================================================\nИстория заявок:\n\nВыберите заявку:",
-                    reply_markup=orders_list_inline(
-                        items,
-                        page=0,
-                        has_next=has_next,
-                        prefix="ord",
-                        show_filters=True,
-                        current_filter=None,
-                        filter_mode="history",
-                    ),
-                )
-            await state.update_data(orders=orders, page=0, mode="history", status_filter=None)
-        else:
-            # «Мои заявки» — различаем пользователя и админа.
-            is_admin_in_my = data.get("is_admin_in_my", False)
-            if is_admin_in_my:
-                # Все свои заявки в статусах «в работе» и «готово».
-                in_work = await get_orders(
-                    responsible_telegram_id=user_id, status="в работе", limit=100
-                )
-                ready = await get_orders(
-                    responsible_telegram_id=user_id, status="готово", limit=100
-                )
-                seen_ids: set[int] = set()
-                orders = []
-                for o in in_work + ready:
-                    oid = int(o.get("id"))
-                    if oid in seen_ids:
-                        continue
-                    seen_ids.add(oid)
-                    orders.append(o)
-                filter_mode = "my_admin"
-                title = "Ваши заявки (в работе и выполненные):\n\nВыберите заявку:"
-                items = [(o["id"], o["number"], o["status"]) for o in orders]
-            else:
-                # Все свои заявки пользователя, без фильтра.
-                orders = await get_orders(author_telegram_id=user_id, limit=100)
-                filter_mode = "my_user"
-                title = "Ваши заявки:\n\nВыберите заявку для просмотра:"
-                items = [
-                    (o["id"], o["number"], _user_visible_status(o["status"]))
-                    for o in orders
-                ]
-
-            has_next = len(orders) > ORDERS_PER_PAGE
-            await callback.message.edit_text(
-                title,
-                reply_markup=orders_list_inline(
-                    items,
-                    page=0,
-                    has_next=has_next,
-                    prefix="ord",
-                    show_filters=True,
-                    current_filter=None,
-                    filter_mode=filter_mode,
-                ),
-            )
-            await state.update_data(
-                orders=orders,
-                page=0,
-                mode="my",
-                status_filter=None,
-                is_admin_in_my=is_admin_in_my,
-            )
-    except Exception as e:
-        logger.exception("Orders back failed: %s", e)
-        await callback.answer("Ошибка загрузки.", show_alert=True)
-        return
-
+    await state.clear()
+    from bot.handlers.main_menu import is_admin as _is_admin
+    is_adm = await _is_admin(callback.from_user.id)
+    await callback.message.edit_text("Главное меню:")
+    await callback.message.answer(
+        "Главное меню:",
+        reply_markup=main_menu_kb(is_admin=is_adm),
+    )
     await callback.answer()
 
 
@@ -1068,26 +968,39 @@ async def take_order_in_work(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "orders_back")
 async def orders_list_back(callback: CallbackQuery, state: FSMContext):
-    """Back to orders list."""
+    """Назад из карточки заявки — возврат к тому же списку (тот же фильтр и страница)."""
     data = await state.get_data()
     orders = data.get("orders", [])
     page = data.get("page", 0)
     mode = data.get("mode", "my")
     status_filter = data.get("status_filter")
+    admin_labels = data.get("admin_labels")
 
     if mode == "history":
+        from bot.handlers.history import (
+            _load_admins_tuples,
+            _build_user_color_mapping,
+            _admin_color_label as _history_color_label,
+        )
+        admins_tuples = await _load_admins_tuples()
+        user_to_index, admin_labels = _build_user_color_mapping(orders, admins_tuples)
+
         def _status_with_responsible(o: dict) -> str:
             resp = o.get("responsible_username") or ""
             if not resp:
-                resp = ""
-            else:
-                resp = f" — {resp}"
-            return f"{o['status']}{resp}"
+                return f"{o['status']}"
+            label = _history_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
+            return f"{o['status']} — {label}"
 
         items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
         has_next = len(orders) > (page + 1) * ORDERS_PER_PAGE
         title = f"==================================================\nИстория заявок ({status_filter or 'все'}):"
-        kw = {"show_filters": True, "current_filter": status_filter}
+        kw = {
+            "show_filters": True,
+            "current_filter": status_filter,
+            "filter_mode": "history",
+            "admin_labels": admin_labels,
+        }
     else:
         items = [(o["id"], o["number"], o["status"]) for o in orders]
         has_next = len(orders) > (page + 1) * ORDERS_PER_PAGE
