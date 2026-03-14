@@ -27,13 +27,16 @@ def _user_visible_status(status: str) -> str:
 COLORS = ["🟢", "🟠", "🔵", "🟣", "🟡", "🟤", "🔴", "⚫", "⚪"]
 
 
-def _user_key(telegram_id: int | None, username: str | None) -> int:
+def _user_key(telegram_id: int | None, username: str | None) -> str:
     """Стабильный ключ пользователя для маппинга цветов.
 
-    Цвет жёстко привязан к telegram_id, username на цвет не влияет.
-    Один и тот же tid → один и тот же цвет во всех местах.
+    Цвет жёстко привязан к username; если username нет, используем telegram_id.
+    Один и тот же username → один и тот же цвет во всех местах.
     """
-    return int(telegram_id or 0)
+    uname = (username or "").strip().lower()
+    if uname:
+        return uname
+    return str(telegram_id or "")
 
 
 def _admin_color_label(
@@ -87,18 +90,19 @@ def _build_user_color_mapping(
     orders: list[dict],
     admins_tuples: list[tuple[int | None, str]],
 ) -> tuple[dict, list[str]]:
-    """Строит стабильный маппинг tid -> индекс цвета.
+    """Строит стабильный маппинг user_key -> индекс цвета.
     Сначала все админы в фиксированном порядке, затем ответственные из заявок (не админы).
     Один и тот же пользователь всегда получает один и тот же цвет при любом фильтре/пагинации.
     """
-    responsibles: set[int] = set()
+    responsibles: set[str] = set()
     for o in orders:
         tid = o.get("responsible_telegram_id")
-        if tid:
-            responsibles.add(_user_key(tid, o.get("responsible_username")))
-    admins_set: set[int] = {_user_key(tid, uname) for tid, uname in admins_tuples}
-    all_users: list[int] = []
-    seen: set[int] = set()
+        uname = o.get("responsible_username")
+        if tid or uname:
+            responsibles.add(_user_key(tid, uname))
+    admins_set: set[str] = {_user_key(tid, uname) for tid, uname in admins_tuples}
+    all_users: list[str] = []
+    seen: set[str] = set()
     for tid, uname in admins_tuples:
         k = _user_key(tid, uname)
         if k not in seen:
