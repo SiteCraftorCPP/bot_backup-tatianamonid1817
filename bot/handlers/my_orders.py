@@ -190,12 +190,20 @@ async def order_select(callback: CallbackQuery, state: FSMContext):
     else:
         lines.append(f"Дата: {date_str}")
 
-    # Для администраторов всегда показываем ответственного (если есть).
+    # Для администраторов всегда показываем ответственного с тем же цветом, что в истории.
     if adm:
         resp = order.get("responsible_username")
         resp_id = order.get("responsible_telegram_id")
         if resp or resp_id:
-            label = _admin_color_label(resp_id, resp)
+            from bot.handlers.history import (
+                _load_admins_tuples,
+                _build_user_color_mapping,
+                _admin_color_label as _history_color_label,
+            )
+            admins_tuples = await _load_admins_tuples()
+            full_orders = await get_orders(admin=True, limit=100)
+            user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
+            label = _history_color_label(resp_id, resp, user_to_index)
             lines.append(f"Ответственный: {label}")
     lines.extend(
         [
@@ -221,6 +229,7 @@ async def order_select(callback: CallbackQuery, state: FSMContext):
             current_status=order.get("status"),
             can_user_delete=can_user_delete,
         ),
+        parse_mode="HTML",
     )
     await state.update_data(selected_order_id=order_id)
     await callback.answer()
@@ -320,8 +329,8 @@ async def orders_page(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-def _format_order_message(order: dict) -> str:
-    """Format order details for display."""
+def _format_order_message(order: dict, user_to_index: dict | None = None) -> str:
+    """Format order details for display. Если передан user_to_index — ответственный с цветным кружком (как в истории)."""
     date_str = order["created_at"][:19].replace("T", " ")
     lines = [
         f"<b>Заявка №{order['number']}</b>",
@@ -333,8 +342,14 @@ def _format_order_message(order: dict) -> str:
     else:
         lines.append(f"Дата: {date_str}")
     resp = order.get("responsible_username")
-    if resp:
-        lines.append(f"Ответственный: @{resp}")
+    resp_id = order.get("responsible_telegram_id")
+    if resp or resp_id:
+        if user_to_index is not None:
+            from bot.handlers.history import _admin_color_label as _history_color_label
+            label = _history_color_label(resp_id, resp, user_to_index)
+        else:
+            label = f"@{resp}" if resp else str(resp_id or "")
+        lines.append(f"Ответственный: {label}")
     lines.extend(
         [
             "",
@@ -414,6 +429,11 @@ async def change_order_status(callback: CallbackQuery, state: FSMContext):
     if not order:
         return
 
+    from bot.handlers.history import _load_admins_tuples, _build_user_color_mapping
+    admins_tuples = await _load_admins_tuples()
+    full_orders = await get_orders(admin=True, limit=100)
+    user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
+
     # Уведомление автору при смене статуса
     try:
         author_id = order.get("author_telegram_id")
@@ -435,10 +455,11 @@ async def change_order_status(callback: CallbackQuery, state: FSMContext):
 
     await callback.bot.send_message(
         chat_id,
-        _format_order_message(order),
+        _format_order_message(order, user_to_index=user_to_index),
         reply_markup=order_detail_back_kb(
             is_admin=True, order_id=order_id, current_status=order.get("status")
         ),
+        parse_mode="HTML",
     )
 
 
@@ -804,7 +825,7 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Заявка не найдена или не обновлена.", show_alert=True)
         return
 
-    # Перерисовываем карточку заявки с новым ответственным.
+    # Перерисовываем карточку заявки с новым ответственным и тем же цветом, что в истории.
     try:
         order = await get_order(order_id)
     except Exception as e:
@@ -815,11 +836,17 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ответственный сохранён, но заявка не найдена.", show_alert=True)
         return
 
+    from bot.handlers.history import _load_admins_tuples, _build_user_color_mapping
+    admins_tuples = await _load_admins_tuples()
+    full_orders = await get_orders(admin=True, limit=100)
+    user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
+
     await callback.message.edit_text(
-        _format_order_message(order),
+        _format_order_message(order, user_to_index=user_to_index),
         reply_markup=order_detail_back_kb(
             is_admin=True, order_id=order_id, current_status=order.get("status")
         ),
+        parse_mode="HTML",
     )
     await callback.answer("Ответственный обновлён.")
 
