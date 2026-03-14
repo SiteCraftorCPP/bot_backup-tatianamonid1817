@@ -15,3 +15,7 @@ credentials.json
 # Logs & temp
 *.log
 
+# Optional: large data (CSV exports)
+# file1.csv
+# file2.csv
+

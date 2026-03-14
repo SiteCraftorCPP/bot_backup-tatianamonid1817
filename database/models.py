@@ -65,6 +65,7 @@ class Product(Base):
     extended_status: Mapped[str | None] = mapped_column(String(200), nullable=True)
     signed: Mapped[str | None] = mapped_column(String(50), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=True, default=True)
+    product_type: Mapped[str | None] = mapped_column(String(20), nullable=True)  # 'clothing' | 'shoes'
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(TZ_UTC3))
     
     order_items: Mapped[list["OrderItem"]] = relationship("OrderItem", back_populates="product")
