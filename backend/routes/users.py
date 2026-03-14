@@ -1,10 +1,10 @@
 """User management API routes."""
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.session import get_db
-from database.models import User
+from database.models import User, Order
 from backend.schemas import UserUpsert, UserResponse
 
 
@@ -43,6 +43,14 @@ async def upsert_user(
 
     await db.flush()
     await db.refresh(user)
+    # Обновить username ответственного во всех заявках, чтобы в «История заявок» отображался @username, а не id
+    if data.username is not None and data.telegram_id:
+        await db.execute(
+            update(Order)
+            .where(Order.responsible_telegram_id == data.telegram_id)
+            .values(responsible_username=data.username)
+        )
+        await db.flush()
     return UserResponse.model_validate(user)
 
 
