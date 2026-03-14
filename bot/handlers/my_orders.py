@@ -983,7 +983,8 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
             _admin_color_label as _history_color_label,
         )
         admins_tuples = await _load_admins_tuples()
-        user_to_index, admin_labels = _build_user_color_mapping(orders, admins_tuples)
+        full_orders = await get_orders(admin=True, limit=100)
+        user_to_index, admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
 
         def _status_with_responsible(o: dict) -> str:
             resp = o.get("responsible_username") or ""

@@ -85,8 +85,9 @@ def _build_user_color_mapping(
     orders: list[dict],
     admins_tuples: list[tuple[int | None, str]],
 ) -> tuple[dict, list[str]]:
-    """По заявкам и списку админов строит маппинг (tid, username) -> индекс цвета и список подписей админов.
-    Каждому уникальному пользователю — свой цвет (без дублей).
+    """Строит стабильный маппинг (tid, username) -> индекс цвета.
+    Сначала все админы в фиксированном порядке, затем ответственные из заявок (не админы).
+    Один и тот же пользователь всегда получает один и тот же цвет при любом фильтре/пагинации.
     """
     responsibles = set()
     for o in orders:
@@ -95,7 +96,17 @@ def _build_user_color_mapping(
         if tid or uname:
             responsibles.add(_user_key(tid, uname))
     admins_set = {_user_key(tid, uname) for tid, uname in admins_tuples}
-    all_users = sorted(admins_set | responsibles, key=lambda u: (u[1] or "", str(u[0])))
+    all_users: list[tuple] = []
+    seen: set[tuple] = set()
+    for tid, uname in admins_tuples:
+        k = _user_key(tid, uname)
+        if k not in seen:
+            seen.add(k)
+            all_users.append(k)
+    for k in sorted(responsibles - admins_set, key=lambda u: (u[1] or "", str(u[0]))):
+        if k not in seen:
+            seen.add(k)
+            all_users.append(k)
     user_to_index = {u: i for i, u in enumerate(all_users)}
     admin_labels = [_admin_color_label(tid, uname, user_to_index) for tid, uname in admins_tuples]
     return user_to_index, admin_labels
@@ -173,7 +184,8 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                 return
             orders = await get_orders(admin=True, status=status, limit=100)
             admins_tuples = await _load_admins_tuples()
-            user_to_index, admin_labels = _build_user_color_mapping(orders, admins_tuples)
+            full_orders = await get_orders(admin=True, limit=100)
+            user_to_index, admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
 
             if not orders:
                 await callback.message.edit_text(
