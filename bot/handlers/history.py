@@ -142,14 +142,14 @@ async def history_orders(message: Message, state: FSMContext):
     items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
     has_next = len(orders) > ORDERS_PER_PAGE
     await message.answer(
-        "==================================================\nИстория заявок:\n\nВыберите заявку для просмотра:",
+        "==================================================\nИстория заявок (все):\n\nВыберите заявку для просмотра:",
         reply_markup=orders_list_inline(
             items,
             page=0,
             has_next=has_next,
             prefix="ord",
             show_filters=True,
-            current_filter=None,
+            current_filter="all",
             filter_mode="history",
             admin_labels=admin_labels,
         ),
@@ -158,7 +158,7 @@ async def history_orders(message: Message, state: FSMContext):
         orders=orders,
         page=0,
         mode="history",
-        status_filter=None,
+        status_filter="all",
         admin_filter=None,
         admin_labels=admin_labels,
     )

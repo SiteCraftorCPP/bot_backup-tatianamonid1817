@@ -254,9 +254,9 @@ def orders_list_inline(
     ])
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀ Пред", callback_data=f"{prefix}pg:{page-1}"))
+        nav.append(InlineKeyboardButton(text="◀ Назад", callback_data=f"{prefix}pg:{page-1}"))
     if has_next:
-        nav.append(InlineKeyboardButton(text="След ▶", callback_data=f"{prefix}pg:{page+1}"))
+        nav.append(InlineKeyboardButton(text="Вперёд ▶", callback_data=f"{prefix}pg:{page+1}"))
     if nav:
         buttons.append(nav)
     buttons.append([InlineKeyboardButton(text="« Назад", callback_data=f"{prefix}_back")])
