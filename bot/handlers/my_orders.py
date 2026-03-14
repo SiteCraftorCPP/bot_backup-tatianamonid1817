@@ -722,32 +722,24 @@ async def change_responsible_start(callback: CallbackQuery, state: FSMContext):
         return
 
     current_resp_id = order.get("responsible_telegram_id")
+    # Список админов и цвета берём из той же логики, что и «История заявок»,
+    # чтобы кружки и подписи полностью совпадали.
+    from bot.handlers.history import (
+        _load_admins_tuples,
+        _build_user_color_mapping,
+        _admin_color_label as _history_color_label,
+    )
 
-    # Собираем список админов: из ADMIN_IDS и из БД (role=admin).
-    settings = get_settings()
-    admin_ids_cfg = set(settings.admin_ids_list)
-    try:
-        admins_db = await list_admins()
-    except Exception as e:
-        logger.exception("List admins failed: %s", e)
-        admins_db = []
-
-    admins: dict[int, str | None] = {}
-    for a in admins_db or []:
-        try:
-            tid = int(a.get("telegram_id"))
-        except (TypeError, ValueError):
-            continue
-        admins[tid] = a.get("username")
-    for tid in admin_ids_cfg:
-        admins.setdefault(tid, None)
+    admins_tuples = await _load_admins_tuples()
+    full_orders = await get_orders(admin=True, limit=100)
+    user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
 
     # Исключаем текущего ответственного, чтобы не предлагать его ещё раз.
     buttons: list[list[InlineKeyboardButton]] = []
-    for tid, username in admins.items():
+    for tid, username in admins_tuples:
         if current_resp_id and tid == current_resp_id:
             continue
-        label = f"@{username}" if username else str(tid)
+        label = _history_color_label(tid, username, user_to_index)
         buttons.append(
             [
                 InlineKeyboardButton(
