@@ -13,13 +13,26 @@ TZ_UTC3 = timezone(timedelta(hours=3))
 
 
 async def generate_order_number(db: AsyncSession) -> str:
-    """Generate unique order number: YYYY-MM-NNN (e.g. 2026-02-025)."""
+    """Generate next order number: YYYY-MM-NNN (e.g. 2026-02-025).
+
+    Берём НЕ count(*), а максимальный существующий номер и увеличиваем суффикс.
+    Так мы не попадаем в UNIQUE-конфликт, если какие-то заявки были удалены.
+    """
     today = datetime.now(TZ_UTC3)
     prefix = today.strftime("%Y-%m")
-    stmt = select(func.count(Order.id)).where(Order.number.like(f"{prefix}-%"))
+    stmt = select(func.max(Order.number)).where(Order.number.like(f"{prefix}-%"))
     result = await db.execute(stmt)
-    count = result.scalar() or 0
-    return f"{prefix}-{count + 1:03d}"
+    max_number: str | None = result.scalar()
+    if not max_number:
+        return f"{prefix}-001"
+    try:
+        # Ожидаемый формат: YYYY-MM-NNN
+        last_part = max_number.split("-")[-1]
+        last_int = int(last_part)
+    except Exception:
+        # На всякий случай, если формат неожиданный — начинаем с 1
+        last_int = 0
+    return f"{prefix}-{last_int + 1:03d}"
 
 
 async def get_or_create_user(
