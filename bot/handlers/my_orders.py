@@ -1030,6 +1030,12 @@ async def take_order_in_work(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "orders_back")
 async def orders_list_back(callback: CallbackQuery, state: FSMContext):
     """Назад из карточки заявки — возврат к тому же списку (тот же фильтр и страница)."""
+    # Сразу отвечаем, чтобы убрать "часики" в интерфейсе
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
     data = await state.get_data()
     orders = data.get("orders", [])
     page = data.get("page", 0)
@@ -1056,7 +1062,8 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
 
         items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
         has_next = len(orders) > (page + 1) * ORDERS_PER_PAGE
-        title = f"==================================================\nИстория заявок ({status_filter or 'все'}):"
+        status_label = "все" if (not status_filter or status_filter == "all") else str(status_filter)
+        title = f"==================================================\nИстория заявок ({status_label}):"
         kw = {
             "show_filters": True,
             "current_filter": status_filter,
@@ -1068,8 +1075,19 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
         has_next = len(orders) > (page + 1) * ORDERS_PER_PAGE
         title = "Ваши заявки:"
         kw = {}
-    await callback.message.edit_text(
-        f"{title}\n\nВыберите заявку для просмотра:",
-        reply_markup=orders_list_inline(items, page=page, has_next=has_next, prefix="ord", **kw),
-    )
-    await callback.answer()
+
+    text = f"{title}\n\nВыберите заявку для просмотра:"
+    markup = orders_list_inline(items, page=page, has_next=has_next, prefix="ord", **kw)
+
+    # Пытаемся отредактировать текущее сообщение; если Telegram не даёт (редкое),
+    # шлём новый список и удаляем карточку.
+    try:
+        await callback.message.edit_text(text, reply_markup=markup)
+    except Exception:
+        try:
+            await callback.message.answer(text, reply_markup=markup)
+        finally:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
