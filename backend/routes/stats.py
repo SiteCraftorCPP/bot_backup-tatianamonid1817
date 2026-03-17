@@ -23,15 +23,32 @@ def _month_range(year: int, month: int) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _parse_ddmmyy(value: str) -> datetime:
+    """Парсинг даты в формате дд.мм.гг в TZ_UTC3 (00:00)."""
+    try:
+        dt = datetime.strptime(value.strip(), "%d.%m.%y")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="date must be in format dd.mm.yy") from exc
+    return dt.replace(tzinfo=TZ_UTC3)
+
+
 @router.get("/summary")
 async def stats_summary(
     month: str | None = Query(
         default=None,
         description="Месяц в формате YYYY-MM. Если не указан — текущий месяц.",
     ),
+    date_from: str | None = Query(
+        default=None,
+        description="Дата начала периода в формате дд.мм.гг (включительно).",
+    ),
+    date_to: str | None = Query(
+        default=None,
+        description="Дата конца периода в формате дд.мм.гг (включительно).",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    """Сводная статистика по заявкам за месяц.
+    """Сводная статистика по заявкам за месяц или период.
 
     - total_orders: общее количество созданных заявок за месяц
     - by_user: сколько заявок создал каждый пользователь
@@ -40,7 +57,18 @@ async def stats_summary(
     """
     # Определяем диапазон дат
     now = datetime.now(TZ_UTC3)
-    if month:
+    if (date_from is not None) or (date_to is not None):
+        if not date_from or not date_to:
+            raise HTTPException(status_code=400, detail="date_from and date_to must be provided together")
+        start = _parse_ddmmyy(date_from)
+        end_inclusive = _parse_ddmmyy(date_to)
+        if start > end_inclusive:
+            raise HTTPException(status_code=400, detail="date_from must be <= date_to")
+        # end — следующий день (исключая), чтобы включить весь date_to
+        end = end_inclusive + timedelta(days=1)
+        year = start.year
+        mon = start.month
+    elif month:
         try:
             year_str, mon_str = month.split("-")
             year = int(year_str)
@@ -51,7 +79,8 @@ async def stats_summary(
         year = now.year
         mon = now.month
 
-    start, end = _month_range(year, mon)
+    if (date_from is None) and (date_to is None):
+        start, end = _month_range(year, mon)
 
     # 1) Общее количество заявок за месяц
     stmt_total = select(func.count()).select_from(Order).where(
@@ -116,6 +145,8 @@ async def stats_summary(
     return {
         "year": year,
         "month": mon,
+        "date_from": date_from,
+        "date_to": date_to,
         "total_orders": total_orders,
         "by_user": by_user,
         "by_admin_completed": by_admin_completed,

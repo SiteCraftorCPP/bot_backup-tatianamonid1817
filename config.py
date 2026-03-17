@@ -2,6 +2,7 @@
 from typing import ClassVar
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+from urllib.parse import quote
 
 
 class Settings(BaseSettings):
@@ -11,6 +12,7 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     WORK_CHAT_ID: str = ""  # Рабочий чат для заявок
     ADMIN_IDS: str = ""  # Comma-separated telegram IDs
+    TELEGRAM_PROXY: str | None = None  # socks5://user:pass@host:port или host:port:user:pass
     
     # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./chestny_znak.db"
@@ -46,6 +48,28 @@ class Settings(BaseSettings):
         raw = (self.WORK_CHAT_ID or "").strip()
         if not raw or raw == self.WORK_CHAT_ID_PLACEHOLDER:
             return None
+        return raw
+
+    @property
+    def telegram_proxy_url(self) -> str | None:
+        """Нормализовать прокси для Telegram API.
+
+        Поддерживаем:
+        - socks5://user:pass@host:port (или http://...)
+        - host:port:user:pass (удобный формат из панелей)
+        """
+        raw = (self.TELEGRAM_PROXY or "").strip()
+        if not raw:
+            return None
+        if "://" in raw:
+            return raw
+        # host:port:user:pass
+        parts = raw.split(":")
+        if len(parts) == 4:
+            host, port, user, password = parts
+            user_q = quote(user, safe="")
+            pass_q = quote(password, safe="")
+            return f"socks5://{user_q}:{pass_q}@{host}:{port}"
         return raw
 
 

@@ -290,11 +290,27 @@ async def delete_order_admin(order_id: int, requester_telegram_id: int) -> dict:
         return r.json()
 
 
-async def get_stats_summary(month: str | None = None) -> dict:
-    """Получить сводную статистику заявок за месяц."""
+async def get_stats_summary(
+    month: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
+    """Получить сводную статистику заявок.
+
+    - month: YYYY-MM (совместимость со старым API)
+    - date_from/date_to: период в формате дд.мм.гг
+    """
     url = f"{get_settings().BACKEND_URL}/stats/summary"
-    params = {"month": month} if month else None
+    params: dict[str, str] = {}
+    if month:
+        params["month"] = month
+    if date_from:
+        params["date_from"] = date_from
+    if date_to:
+        params["date_to"] = date_to
+    if not params:
+        params = {}
     async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(url, params=params)
+        r = await client.get(url, params=params or None)
         r.raise_for_status()
         return r.json()

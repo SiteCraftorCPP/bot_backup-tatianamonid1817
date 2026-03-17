@@ -1,5 +1,6 @@
 # Telegram Bot
 aiogram>=3.13.0
+aiohttp-socks>=0.8.4
 
 # Backend
 fastapi>=0.115.0

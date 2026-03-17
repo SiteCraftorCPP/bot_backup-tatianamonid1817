@@ -289,6 +289,7 @@ async def orders_page(callback: CallbackQuery, state: FSMContext):
     status_filter = data.get("status_filter")
 
     if mode == "history":
+        filters_collapsed = bool(data.get("filters_collapsed", False))
         def _status_with_responsible(o: dict) -> str:
             resp = o.get("responsible_username") or ""
             if not resp:
@@ -315,13 +316,15 @@ async def orders_page(callback: CallbackQuery, state: FSMContext):
     has_next = len(orders) > start + ORDERS_PER_PAGE
     kw = (
         {
-            "show_filters": True,
+            "show_filters": (mode != "history") or (not filters_collapsed),
             "current_filter": status_filter,
             "filter_mode": filter_mode,
         }
         if mode in ("history", "my")
         else {}
     )
+    if mode == "history" and filters_collapsed:
+        kw["filters_back_callback"] = "fltmenu"
     await callback.message.edit_reply_markup(
         reply_markup=orders_list_inline(items, page=page, has_next=has_next, prefix="ord", **kw),
     )
@@ -799,6 +802,17 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ошибка данных.", show_alert=True)
         return
 
+    # Получаем заявку до изменений, чтобы понимать текущий статус.
+    try:
+        order_before = await get_order(order_id)
+    except Exception as e:
+        logger.exception("Get order before set_resp failed: %s", e)
+        await callback.answer("Ошибка загрузки заявки.", show_alert=True)
+        return
+    if not order_before:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+
     # Пытаемся получить username из БД, чтобы красиво показать в карточке.
     username: str | None
     try:
@@ -806,14 +820,22 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         logger.exception("Get user for set_resp failed: %s", e)
         user = None
-    if user:
-        username = user.get("username")
+    username = user.get("username") if user else None
+
+    # Логика статуса при смене ответственного:
+    # - если заявка ещё не отправлена ("создана" / "в работе" / "готово") — переводим в "в работе",
+    #   чтобы у нового админа она появилась в «Мои заявки» в нужном статусе;
+    # - если уже "отправлена" — статус не трогаем.
+    current_status = str(order_before.get("status") or "")
+    if current_status in ("создана", "в работе", "готово"):
+        new_status: str | None = "в работе"
     else:
-        username = None
+        new_status = None
 
     try:
         updated = await update_order(
             order_id,
+            status=new_status,
             responsible_telegram_id=new_resp_id,
             responsible_username=username,
         )
@@ -848,6 +870,26 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         ),
         parse_mode="HTML",
     )
+
+    # Уведомление новому администратору о передаче заявки.
+    try:
+        changer_id = callback.from_user.id if callback.from_user else new_resp_id
+        changer_username = (
+            callback.from_user.username if (callback.from_user and callback.from_user.username) else None
+        )
+        changer_label = f"@{changer_username}" if changer_username else str(changer_id)
+
+        # username для нового ответственного: берём из свежего апдейта, иначе из user, иначе id.
+        new_resp_username = username or (user.get("username") if user else None)
+        new_label = f"@{new_resp_username}" if new_resp_username else str(new_resp_id)
+        text = (
+            f"{changer_label} скорректировал ответственного заявки №{order['number']} "
+            f"на {new_label}"
+        )
+        await callback.bot.send_message(chat_id=new_resp_id, text=text)
+    except Exception as e:
+        logger.exception("Notify new responsible failed: %s", e)
+
     await callback.answer("Ответственный обновлён.")
 
 

@@ -2,15 +2,19 @@
 import logging
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart
 
 from config import get_settings
-from bot.keyboards import main_menu_kb
+from bot.keyboards import main_menu_kb, stats_mode_inline_kb
 from bot import api_client
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+class StatsStates(StatesGroup):
+    waiting_for_period = State()
 
 
 async def is_admin(telegram_id: int) -> bool:
@@ -61,29 +65,125 @@ async def back_to_main(message: Message, state: FSMContext):
 
 @router.message(F.text == "📊 Статистика")
 async def stats_menu(message: Message):
-    """Показать сводную статистику за текущий месяц (только админам)."""
+    """Открыть меню статистики (только админам)."""
     user_id = message.from_user.id if message.from_user else 0
     if not await is_admin(user_id):
         await message.answer("Доступно только администраторам.")
         return
-    try:
-        stats = await api_client.get_stats_summary()
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Failed to fetch stats: %s", e)
-        await message.answer("Ошибка получения статистики. Попробуйте позже.")
+    await message.answer(
+        "📊 Статистика — выберите режим:",
+        reply_markup=stats_mode_inline_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("stats:"))
+async def stats_choose_mode(callback: CallbackQuery, state: FSMContext):
+    if not callback.from_user:
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    user_id = callback.from_user.id
+    if not await is_admin(user_id):
+        await callback.answer("Доступно только администраторам.", show_alert=True)
         return
 
-    year = stats.get("year")
-    month = stats.get("month")
+    mode = (callback.data or "").split(":", 1)[1]
+    if mode == "cancel":
+        await state.clear()
+        await callback.message.edit_text("Ок, отменил.")
+        await callback.answer()
+        return
+
+    if mode == "month":
+        try:
+            stats = await api_client.get_stats_summary()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Failed to fetch stats: %s", e)
+            await callback.answer()
+            await callback.message.answer("Ошибка получения статистики. Попробуйте позже.")
+            return
+
+        year = stats.get("year")
+        month = stats.get("month")
+        total = stats.get("total_orders", 0)
+        by_user = stats.get("by_user") or []
+        by_admin = stats.get("by_admin_completed") or []
+
+        lines: list[str] = []
+        lines.append(f"📊 Статистика за {month:02d}.{year}:")
+        lines.append("")
+        lines.append(f"Всего заявок создано: <b>{total}</b>")
+
+        if by_user:
+            lines.append("")
+            lines.append("👤 По пользователям (создали заявок):")
+            for row in by_user:
+                uname = row.get("username") or ""
+                tid = row.get("telegram_id")
+                label = f"@{uname}" if uname else str(tid)
+                lines.append(f"- {label}: {row.get('orders_count', 0)}")
+
+        if by_admin:
+            lines.append("")
+            lines.append("👨‍💼 По администраторам (выполнили заявок):")
+            for row in by_admin:
+                uname = row.get("username") or ""
+                tid = row.get("telegram_id")
+                label = f"@{uname}" if uname else str(tid)
+                lines.append(f"- {label}: {row.get('orders_count', 0)}")
+
+        await callback.answer()
+        await callback.message.edit_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    if mode == "period":
+        await state.set_state(StatsStates.waiting_for_period)
+        await callback.answer()
+        await callback.message.edit_text(
+            "Введите период одной строкой в формате:\n"
+            "<code>с 01.03.26 по 16.03.26</code>\n"
+            "или\n"
+            "<code>01.03.26 16.03.26</code>\n\n"
+            "Для отмены нажмите «Отмена».",
+            parse_mode="HTML",
+            reply_markup=stats_mode_inline_kb(),
+        )
+        return
+
+    await callback.answer("Неизвестная команда.", show_alert=True)
+
+
+@router.message(StatsStates.waiting_for_period)
+async def stats_period_apply(message: Message, state: FSMContext):
+    """Построить статистику по вручную введённому периоду."""
+    user_id = message.from_user.id if message.from_user else 0
+    if not await is_admin(user_id):
+        await message.answer("Доступно только администраторам.")
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    # Достаём 2 даты дд.мм.гг
+    import re
+    m = re.findall(r"\b(\d{2}\.\d{2}\.\d{2})\b", text)
+    if len(m) < 2:
+        await message.answer("Не понял период. Пример: <code>с 01.03.26 по 16.03.26</code>", parse_mode="HTML")
+        return
+    date_from, date_to = m[0], m[1]
+    try:
+        stats = await api_client.get_stats_summary(date_from=date_from, date_to=date_to)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Failed to fetch period stats: %s", e)
+        await message.answer("Ошибка получения статистики за период. Попробуйте позже.")
+        await state.clear()
+        return
+
     total = stats.get("total_orders", 0)
     by_user = stats.get("by_user") or []
     by_admin = stats.get("by_admin_completed") or []
 
     lines: list[str] = []
-    lines.append(f"📊 Статистика за {month:02d}.{year}:")
+    lines.append(f"📊 Статистика за период {date_from} — {date_to}:")
     lines.append("")
     lines.append(f"Всего заявок создано: <b>{total}</b>")
-
     if by_user:
         lines.append("")
         lines.append("👤 По пользователям (создали заявок):")
@@ -92,7 +192,6 @@ async def stats_menu(message: Message):
             tid = row.get("telegram_id")
             label = f"@{uname}" if uname else str(tid)
             lines.append(f"- {label}: {row.get('orders_count', 0)}")
-
     if by_admin:
         lines.append("")
         lines.append("👨‍💼 По администраторам (выполнили заявок):")
@@ -103,6 +202,7 @@ async def stats_menu(message: Message):
             lines.append(f"- {label}: {row.get('orders_count', 0)}")
 
     await message.answer("\n".join(lines))
+    await state.clear()
 
 
 @router.message(F.text == "❓ Помощь")

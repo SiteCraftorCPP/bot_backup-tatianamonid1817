@@ -23,6 +23,18 @@ def main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
+def stats_mode_inline_kb() -> InlineKeyboardMarkup:
+    """Инлайн-выбор режима статистики."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Текущий месяц", callback_data="stats:month"),
+                InlineKeyboardButton(text="Период", callback_data="stats:period"),
+            ],
+            [InlineKeyboardButton(text="Отмена", callback_data="stats:cancel")],
+        ]
+    )
+
 def skip_inline_kb(callback_data: str) -> InlineKeyboardMarkup:
     """Inline button to skip optional field (MS number, comment)."""
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -191,7 +203,9 @@ def orders_list_inline(
     show_filters: bool = False,
     current_filter: str | None = None,
     filter_mode: str = "history",
-    admin_labels: list[str] | None = None,
+    admin_labels: list[tuple[str, str]] | None = None,
+    filters_back_callback: str | None = None,
+    filters_back_text: str = "« Категории",
 ) -> InlineKeyboardMarkup:
     """Inline list of orders for selection.
     filter_mode:
@@ -203,6 +217,12 @@ def orders_list_inline(
     start = page * per_page
     items = orders[start : start + per_page]
     buttons = []
+
+    # Кнопка возврата к выбору категорий (статусных фильтров).
+    if filters_back_callback:
+        buttons.append(
+            [InlineKeyboardButton(text=filters_back_text, callback_data=filters_back_callback)]
+        )
 
     if show_filters:
         if filter_mode == "history":
@@ -238,8 +258,8 @@ def orders_list_inline(
     # Ряд(ы) с именами админов над списком заявок (используется в истории заявок).
     if admin_labels:
         row: list[InlineKeyboardButton] = []
-        for label in admin_labels:
-            row.append(InlineKeyboardButton(text=label, callback_data="admnoop"))
+        for label, cb in admin_labels:
+            row.append(InlineKeyboardButton(text=label, callback_data=cb))
             if len(row) >= 3:
                 buttons.append(row)
                 row = []

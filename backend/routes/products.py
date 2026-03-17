@@ -1,7 +1,7 @@
 """Products API routes."""
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
-from sqlalchemy import select, or_, func
+from sqlalchemy import select, or_, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.session import get_db
@@ -10,6 +10,18 @@ from backend.schemas import ProductResponse
 from backend.services.template_service import generate_user_template_excel
 
 router = APIRouter()
+
+def _normalize_category(category: str | None) -> str | None:
+    """Нормализовать категорию бота в product_type ('clothing'|'shoes')."""
+    if not category:
+        return None
+    c = category.strip().lower()
+    if "обув" in c or "shoe" in c:
+        return "shoes"
+    if "одеж" in c or "cloth" in c:
+        return "clothing"
+    # Неизвестное значение — не фильтруем
+    return None
 
 
 @router.get("/brands", response_model=list[str])
@@ -65,14 +77,38 @@ async def get_template_by_article(
     не по артикулу.
     """
     q = f"%{article.strip()}%"
-    stmt = select(Product).where(
+    mode = _normalize_category(category)
+
+    # Бизнес-правило: если пользователь выбрал "Одежда" — ищем только одежду,
+    # если "Обувь" — только обувь. Чтобы не ломать старые данные, где product_type
+    # может быть пустым, используем запасной признак обуви по ТН ВЭД (64*).
+    base_filters = [
         Product.is_active.is_(True),
         or_(
             Product.name.ilike(q),
             Product.variant.ilike(q),
             Product.article.ilike(q),
         ),
-    )
+    ]
+    if mode == "shoes":
+        base_filters.append(
+            or_(
+                Product.product_type == "shoes",
+                and_(Product.product_type.is_(None), Product.tnved_code.ilike("64%")),
+            )
+        )
+    elif mode == "clothing":
+        base_filters.append(
+            or_(
+                Product.product_type == "clothing",
+                and_(
+                    Product.product_type.is_(None),
+                    or_(Product.tnved_code.is_(None), Product.tnved_code.is_not(None) & ~Product.tnved_code.ilike("64%")),
+                ),
+            )
+        )
+
+    stmt = select(Product).where(*base_filters)
 
     stmt = stmt.order_by(Product.article, Product.size).limit(500)
     result = await db.execute(stmt)
@@ -80,6 +116,10 @@ async def get_template_by_article(
     if not products:
         from fastapi import HTTPException
 
+        if mode == "shoes":
+            raise HTTPException(status_code=404, detail="Товары по запросу не найдены в категории «Обувь»")
+        if mode == "clothing":
+            raise HTTPException(status_code=404, detail="Товары по запросу не найдены в категории «Одежда»")
         raise HTTPException(status_code=404, detail="Товары по запросу не найдены")
     rows = [ProductResponse.model_validate(p).model_dump() for p in products]
     excel_bytes = generate_user_template_excel(
@@ -100,10 +140,12 @@ async def get_template_by_article(
 async def search_products(
     q: str = Query(..., min_length=1),
     limit: int = Query(20, ge=1, le=100),
+    category: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Search products by name/variant + артикул."""
+    """Search products by name/variant + артикул (опционально в рамках категории)."""
     q_lower = f"%{q.lower()}%"
+    mode = _normalize_category(category)
     stmt = (
         select(Product)
         .where(
@@ -116,6 +158,20 @@ async def search_products(
         )
         .limit(limit)
     )
+    if mode == "shoes":
+        stmt = stmt.where(
+            or_(
+                Product.product_type == "shoes",
+                and_(Product.product_type.is_(None), Product.tnved_code.ilike("64%")),
+            )
+        )
+    elif mode == "clothing":
+        stmt = stmt.where(
+            or_(
+                Product.product_type == "clothing",
+                and_(Product.product_type.is_(None), or_(Product.tnved_code.is_(None), ~Product.tnved_code.ilike("64%"))),
+            )
+        )
     result = await db.execute(stmt)
     products = result.scalars().all()
     return [ProductResponse.model_validate(p) for p in products]

@@ -117,6 +117,24 @@ def _build_user_color_mapping(
     return user_to_index, admin_labels
 
 
+def _build_admin_filter_buttons(
+    admins_tuples: list[tuple[int | None, str]],
+    user_to_index: dict,
+    selected_admin_id: int | None,
+) -> list[tuple[str, str]]:
+    """Кнопки фильтрации по админам (ответственным). Всегда возвращает полный список админов."""
+    btns: list[tuple[str, str]] = []
+    all_suffix = " ✓" if selected_admin_id is None else ""
+    btns.append((f"Все админы{all_suffix}", "admflt:all"))
+    for tid, uname in admins_tuples:
+        if tid is None:
+            continue
+        label = _admin_color_label(tid, uname, user_to_index)
+        suffix = " ✓" if selected_admin_id == tid else ""
+        btns.append((label + suffix, f"admflt:{tid}"))
+    return btns
+
+
 @router.message(F.text == "📜 История заявок")
 async def history_orders(message: Message, state: FSMContext):
     """Admin: show all orders."""
@@ -135,7 +153,8 @@ async def history_orders(message: Message, state: FSMContext):
         return
 
     admins_tuples = await _load_admins_tuples()
-    user_to_index, admin_labels = _build_user_color_mapping(orders, admins_tuples)
+    user_to_index, _ = _build_user_color_mapping(orders, admins_tuples)
+    admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=None)
 
     def _status_with_responsible(o: dict) -> str:
         resp = o.get("responsible_username") or ""
@@ -156,7 +175,7 @@ async def history_orders(message: Message, state: FSMContext):
             show_filters=True,
             current_filter="all",
             filter_mode="history",
-            admin_labels=admin_labels,
+            admin_labels=admin_buttons,
         ),
     )
     await state.update_data(
@@ -164,9 +183,183 @@ async def history_orders(message: Message, state: FSMContext):
         page=0,
         mode="history",
         status_filter="all",
+        filters_collapsed=False,
         admin_filter=None,
-        admin_labels=admin_labels,
+        admin_labels=admin_buttons,
     )
+
+
+@router.callback_query(F.data == "fltmenu")
+async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
+    """Вернуться к выбору категорий (статусов) в истории заявок."""
+    if not callback.from_user:
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    if not await _is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    status_key = data.get("status_filter") or "all"
+    status = None if status_key == "all" else status_key
+    selected_admin_id = data.get("admin_filter")
+    try:
+        orders = await get_orders(admin=True, status=status, limit=100)
+        admins_tuples = await _load_admins_tuples()
+        full_orders = await get_orders(admin=True, limit=100)
+        user_to_index, admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
+        admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=selected_admin_id)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Get orders failed: %s", e)
+        await callback.answer("Ошибка загрузки.", show_alert=True)
+        return
+
+    if not orders:
+        await callback.message.edit_text(
+            f"==================================================\nИстория заявок ({status or 'все'}):\n\nЗаявок не найдено.",
+            reply_markup=orders_list_inline(
+                [],
+                page=0,
+                has_next=False,
+                prefix="ord",
+                show_filters=True,
+                current_filter=status_key,
+                filter_mode="history",
+                admin_labels=admin_buttons,
+            ),
+        )
+    else:
+        def _status_with_responsible(o: dict) -> str:
+            resp = o.get("responsible_username") or ""
+            if not resp:
+                return f"{o['status']}"
+            label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
+            return f"{o['status']} — {label}"
+
+        items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
+        has_next = len(orders) > ORDERS_PER_PAGE
+        title = f"==================================================\nИстория заявок ({status or 'все'}):"
+        await callback.message.edit_text(
+            f"{title}\n\nВыберите заявку для просмотра:",
+            reply_markup=orders_list_inline(
+                items,
+                page=0,
+                has_next=has_next,
+                prefix="ord",
+                show_filters=True,
+                current_filter=status_key,
+                filter_mode="history",
+                admin_labels=admin_buttons,
+            ),
+        )
+
+    await state.update_data(
+        orders=orders,
+        page=0,
+        mode="history",
+        status_filter=status_key,
+        filters_collapsed=False,
+        admin_filter=selected_admin_id,
+        admin_labels=admin_buttons,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admflt:"))
+async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
+    """Фильтр истории заявок по ответственному админу."""
+    if not callback.from_user:
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    if not await _is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    status_key = data.get("status_filter") or "all"
+    status = None if status_key == "all" else status_key
+
+    raw = callback.data.split(":", 1)[1]
+    selected_admin_id: int | None
+    if raw == "all":
+        selected_admin_id = None
+    else:
+        try:
+            selected_admin_id = int(raw)
+        except ValueError:
+            await callback.answer("Ошибка.", show_alert=True)
+            return
+
+    try:
+        if selected_admin_id is None:
+            orders = await get_orders(admin=True, status=status, limit=100)
+        else:
+            orders = await get_orders(
+                admin=True,
+                status=status,
+                responsible_telegram_id=selected_admin_id,
+                limit=100,
+            )
+        admins_tuples = await _load_admins_tuples()
+        full_orders = await get_orders(admin=True, limit=100)
+        user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
+        admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=selected_admin_id)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Admin filter failed: %s", e)
+        await callback.answer("Ошибка загрузки.", show_alert=True)
+        return
+
+    if not orders:
+        await callback.message.edit_text(
+            f"==================================================\nИстория заявок ({status or 'все'}):\n\nЗаявок не найдено.",
+            reply_markup=orders_list_inline(
+                [],
+                page=0,
+                has_next=False,
+                prefix="ord",
+                show_filters=False,
+                current_filter=status_key,
+                filter_mode="history",
+                admin_labels=admin_buttons,
+                filters_back_callback="fltmenu",
+            ),
+        )
+    else:
+        def _status_with_responsible(o: dict) -> str:
+            resp = o.get("responsible_username") or ""
+            if not resp:
+                return f"{o['status']}"
+            label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
+            return f"{o['status']} — {label}"
+
+        items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
+        has_next = len(orders) > ORDERS_PER_PAGE
+        title = f"==================================================\nИстория заявок ({status or 'все'}):"
+        await callback.message.edit_text(
+            f"{title}\n\nВыберите заявку для просмотра:",
+            reply_markup=orders_list_inline(
+                items,
+                page=0,
+                has_next=has_next,
+                prefix="ord",
+                show_filters=False,
+                current_filter=status_key,
+                filter_mode="history",
+                admin_labels=admin_buttons,
+                filters_back_callback="fltmenu",
+            ),
+        )
+
+    await state.update_data(
+        orders=orders,
+        page=0,
+        mode="history",
+        status_filter=status_key,
+        admin_filter=selected_admin_id,
+        admin_labels=admin_buttons,
+        filters_collapsed=True,
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("flt:"))
@@ -191,6 +384,7 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
             admins_tuples = await _load_admins_tuples()
             full_orders = await get_orders(admin=True, limit=100)
             user_to_index, admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
+            admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=None)
 
             if not orders:
                 await callback.message.edit_text(
@@ -200,10 +394,11 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                         page=0,
                         has_next=False,
                         prefix="ord",
-                        show_filters=True,
+                        show_filters=False,
                         current_filter=status_key,
                         filter_mode="history",
-                        admin_labels=admin_labels,
+                        admin_labels=admin_buttons,
+                        filters_back_callback="fltmenu",
                     ),
                 )
             else:
@@ -224,10 +419,11 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                         page=0,
                         has_next=has_next,
                         prefix="ord",
-                        show_filters=True,
+                        show_filters=False,
                         current_filter=status_key,
                         filter_mode="history",
-                        admin_labels=admin_labels,
+                        admin_labels=admin_buttons,
+                        filters_back_callback="fltmenu",
                     ),
                 )
             await state.update_data(
@@ -236,7 +432,8 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                 mode="history",
                 status_filter=status_key,
                 admin_filter=None,
-                admin_labels=admin_labels,
+                admin_labels=admin_buttons,
+                filters_collapsed=True,
             )
         # Фильтр для «Моих заявок» (пользователь или админ)
         else:
