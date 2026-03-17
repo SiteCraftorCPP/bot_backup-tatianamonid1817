@@ -1061,6 +1061,24 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
     status_filter = data.get("status_filter")
     admin_labels = data.get("admin_labels")
 
+    # Если state пустой (часто бывает после отправки файлов/новых сообщений),
+    # восстанавливаем список заново, чтобы «Назад» всегда работал.
+    if not orders and callback.from_user:
+        try:
+            if await is_admin(callback.from_user.id):
+                mode = "history"
+                status_filter = status_filter or "all"
+                status = None if status_filter == "all" else status_filter
+                orders = await get_orders(admin=True, status=status, limit=100)
+                page = 0
+            else:
+                mode = "my"
+                status_filter = None
+                orders = await get_orders(author_telegram_id=callback.from_user.id, limit=100)
+                page = 0
+        except Exception:
+            pass
+
     if mode == "history":
         from bot.handlers.history import (
             _load_admins_tuples,
