@@ -256,10 +256,16 @@ def orders_list_inline(
             buttons.append(row)
 
     # Ряд(ы) с именами админов над списком заявок (используется в истории заявок).
+    # admin_labels исторически передавались как list[str] (только текст),
+    # но иногда могут прийти как list[tuple[str, str]] (text, callback_data).
     if admin_labels:
         row: list[InlineKeyboardButton] = []
-        for label, cb in admin_labels:
-            row.append(InlineKeyboardButton(text=label, callback_data=cb))
+        for item in admin_labels:
+            if isinstance(item, (tuple, list)) and len(item) == 2:
+                label, cb = item
+                row.append(InlineKeyboardButton(text=str(label), callback_data=str(cb)))
+            else:
+                row.append(InlineKeyboardButton(text=str(item), callback_data="admnoop"))
             if len(row) >= 3:
                 buttons.append(row)
                 row = []
