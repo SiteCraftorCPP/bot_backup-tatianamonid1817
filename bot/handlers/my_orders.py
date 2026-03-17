@@ -221,16 +221,21 @@ async def order_select(callback: CallbackQuery, state: FSMContext):
     show_status_btns = adm
     # Пользователь может удалить только свою заявку со статусом «создана».
     can_user_delete = (not adm) and (order.get("status") == "создана")
-    await callback.message.edit_text(
-        "\n".join(lines),
-        reply_markup=order_detail_back_kb(
-            is_admin=show_status_btns,
-            order_id=order_id,
-            current_status=order.get("status"),
-            can_user_delete=can_user_delete,
-        ),
-        parse_mode="HTML",
+    text = "\n".join(lines)
+    markup = order_detail_back_kb(
+        is_admin=show_status_btns,
+        order_id=order_id,
+        current_status=order.get("status"),
+        can_user_delete=can_user_delete,
     )
+    # Может быть сообщение с документом/фото (caption) — тогда edit_text не сработает.
+    try:
+        if getattr(callback.message, "caption", None) is not None and callback.message.text is None:
+            await callback.message.edit_caption(caption=text, reply_markup=markup, parse_mode="HTML")
+        else:
+            await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
     await state.update_data(selected_order_id=order_id)
     await callback.answer()
 
