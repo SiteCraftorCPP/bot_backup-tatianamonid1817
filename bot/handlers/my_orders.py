@@ -1097,20 +1097,18 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
     text = f"{title}\n\nВыберите заявку для просмотра:"
     markup = orders_list_inline(items, page=page, has_next=has_next, prefix="ord", **kw)
 
-    # Пытаемся отредактировать текущее сообщение:
-    # - если это обычный текст → edit_text
-    # - если это документ/фото с подписью → edit_caption
-    # Если Telegram не даёт — шлём новый список и удаляем карточку.
+    # Максимально надёжно: всегда отправляем новый список и удаляем карточку.
+    # Так работает и для text, и для document/caption, и не зависит от ограничений edit_*.
     try:
-        if getattr(callback.message, "caption", None) is not None and callback.message.text is None:
-            await callback.message.edit_caption(caption=text, reply_markup=markup)
-        else:
-            await callback.message.edit_text(text, reply_markup=markup)
+        await callback.message.answer(text, reply_markup=markup)
     except Exception:
+        # Если даже отправка не удалась — покажем алерт, иначе "тихо" кажется что кнопка не работает
         try:
-            await callback.message.answer(text, reply_markup=markup)
-        finally:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
+            await callback.answer("Не удалось показать список. Попробуйте /start.", show_alert=True)
+        except Exception:
+            pass
+        return
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
