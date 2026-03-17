@@ -26,6 +26,104 @@ logger = logging.getLogger(__name__)
 ORDERS_PER_PAGE = 16
 
 
+async def _safe_edit_card(
+    callback: CallbackQuery,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None,
+    *,
+    parse_mode: str = "HTML",
+) -> None:
+    """Универсально обновить сообщение-карточку (text vs caption)."""
+    msg = callback.message
+    if not msg:
+        return
+    try:
+        if getattr(msg, "caption", None) is not None and msg.text is None:
+            await msg.edit_caption(caption=text, reply_markup=reply_markup, parse_mode=parse_mode)
+        else:
+            await msg.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        await msg.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+
+
+async def _render_order_card(
+    callback: CallbackQuery,
+    state: FSMContext,
+    *,
+    order_id: int,
+) -> None:
+    """Перерисовать карточку заявки (работает и для text, и для caption)."""
+    try:
+        order = await get_order(order_id)
+    except Exception as e:
+        logger.exception("Get order failed: %s", e)
+        await callback.answer("Ошибка загрузки заявки.", show_alert=True)
+        return
+    if not order:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    mode = data.get("mode", "my")
+    _ = mode  # mode используется ниже для файла, но здесь не нужен
+
+    date_str = order["created_at"][:19].replace("T", " ")
+    adm = await is_admin(callback.from_user.id) if callback.from_user else False
+    shown_status = order["status"]
+    if not adm:
+        shown_status = _user_visible_status(shown_status)
+
+    lines = [
+        f"<b>Заявка №{order['number']}</b>",
+        f"Статус: {shown_status}",
+    ]
+
+    if adm:
+        link = _get_order_file_link(order.get("id") or order_id)
+        if link:
+            lines.append(f'Дата: <a href="{link}">{date_str}</a>')
+        else:
+            lines.append(f"Дата: {date_str}")
+    else:
+        lines.append(f"Дата: {date_str}")
+
+    if adm:
+        resp = order.get("responsible_username")
+        resp_id = order.get("responsible_telegram_id")
+        if resp or resp_id:
+            from bot.handlers.history import (
+                _load_admins_tuples,
+                _build_user_color_mapping,
+                _admin_color_label as _history_color_label,
+            )
+            admins_tuples = await _load_admins_tuples()
+            full_orders = await get_orders(admin=True, limit=100)
+            user_to_index, _admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
+            lines.append(f"Ответственный: {_history_color_label(resp_id, resp, user_to_index)}")
+
+    lines.extend(["", "Позиции:"])
+    for i, item in enumerate(order.get("items", []), 1):
+        name = item.get("name") or item.get("article") or "?"
+        lines.append(f"  {i}. {name} — размер {item.get('size', '?')} x{item.get('quantity', 0)}")
+
+    if order.get("yandex_link"):
+        lines.append("")
+        lines.append(f"Ссылка на файлы: {order['yandex_link']}")
+
+    show_status_btns = adm
+    can_user_delete = (not adm) and (order.get("status") == "создана")
+    text = "\n".join(lines)
+    markup = order_detail_back_kb(
+        is_admin=show_status_btns,
+        order_id=order_id,
+        current_status=order.get("status"),
+        can_user_delete=can_user_delete,
+    )
+    await _safe_edit_card(callback, text, markup, parse_mode="HTML")
+    await state.update_data(selected_order_id=order_id)
+    await callback.answer()
+
+
 def _build_message_link(chat_id: int, message_id: int) -> str | None:
     """
     Построить ссылку на сообщение в чате Telegram.
@@ -155,89 +253,7 @@ async def my_orders(message: Message, state: FSMContext):
 async def order_select(callback: CallbackQuery, state: FSMContext):
     """Show order details."""
     order_id = int(callback.data.split(":")[1])
-    try:
-        order = await get_order(order_id)
-    except Exception as e:
-        logger.exception("Get order failed: %s", e)
-        await callback.answer("Ошибка загрузки заявки.", show_alert=True)
-        return
-    if not order:
-        await callback.answer("Заявка не найдена.", show_alert=True)
-        return
-
-    # Определяем режим (история или «мои заявки»), чтобы правильно показать кнопки статусов.
-    data = await state.get_data()
-    mode = data.get("mode", "my")
-
-    date_str = order["created_at"][:19].replace("T", " ")
-    adm = await is_admin(callback.from_user.id) if callback.from_user else False
-    shown_status = order["status"]
-    if not adm:
-        # Пользователь видит статусы по бизнес-логике (создана / в работе / готова).
-        shown_status = _user_visible_status(shown_status)
-
-    lines = [
-        f"<b>Заявка №{order['number']}</b>",
-        f"Статус: {shown_status}",
-    ]
-    # Для админов делаем дату ссылкой на сообщение с файлом заявки (если оно есть).
-    if adm:
-        link = _get_order_file_link(order.get("id") or order_id)
-        if link:
-            lines.append(f'Дата: <a href="{link}">{date_str}</a>')
-        else:
-            lines.append(f"Дата: {date_str}")
-    else:
-        lines.append(f"Дата: {date_str}")
-
-    # Для администраторов всегда показываем ответственного с тем же цветом, что в истории.
-    if adm:
-        resp = order.get("responsible_username")
-        resp_id = order.get("responsible_telegram_id")
-        if resp or resp_id:
-            from bot.handlers.history import (
-                _load_admins_tuples,
-                _build_user_color_mapping,
-                _admin_color_label as _history_color_label,
-            )
-            admins_tuples = await _load_admins_tuples()
-            full_orders = await get_orders(admin=True, limit=100)
-            user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
-            label = _history_color_label(resp_id, resp, user_to_index)
-            lines.append(f"Ответственный: {label}")
-    lines.extend(
-        [
-            "",
-            "Позиции:",
-        ]
-    )
-    for i, item in enumerate(order.get("items", []), 1):
-        name = item.get("name") or item.get("article") or "?"
-        lines.append(f"  {i}. {name} — размер {item.get('size', '?')} x{item.get('quantity', 0)}")
-    if order.get("yandex_link"):
-        lines.append("")
-        lines.append(f"Ссылка на файлы: {order['yandex_link']}")
-    # Кнопки смены статуса для админов — и в «История заявок», и в «Мои заявки».
-    show_status_btns = adm
-    # Пользователь может удалить только свою заявку со статусом «создана».
-    can_user_delete = (not adm) and (order.get("status") == "создана")
-    text = "\n".join(lines)
-    markup = order_detail_back_kb(
-        is_admin=show_status_btns,
-        order_id=order_id,
-        current_status=order.get("status"),
-        can_user_delete=can_user_delete,
-    )
-    # Может быть сообщение с документом/фото (caption) — тогда edit_text не сработает.
-    try:
-        if getattr(callback.message, "caption", None) is not None and callback.message.text is None:
-            await callback.message.edit_caption(caption=text, reply_markup=markup, parse_mode="HTML")
-        else:
-            await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
-    except Exception:
-        await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
-    await state.update_data(selected_order_id=order_id)
-    await callback.answer()
+    await _render_order_card(callback, state, order_id=order_id)
 
     # Для администратора:
     # - в истории заявок шлём админский файл МаркЗнак;
@@ -522,7 +538,7 @@ async def confirm_delete_order(callback: CallbackQuery, state: FSMContext):
             ]
         ]
     )
-    await callback.message.edit_text(text, reply_markup=kb)
+    await _safe_edit_card(callback, text, kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -534,9 +550,7 @@ async def cancel_delete_order(callback: CallbackQuery, state: FSMContext):
     except (IndexError, ValueError):
         await callback.answer()
         return
-    # Переиспользуем существующий хендлер показа деталей.
-    callback.data = f"ord:{order_id}"
-    await order_select(callback, state)
+    await _render_order_card(callback, state, order_id=order_id)
 
 
 @router.callback_query(F.data.startswith("del_yes:"))
@@ -660,7 +674,7 @@ async def admin_confirm_delete_order(callback: CallbackQuery, state: FSMContext)
             ]
         ]
     )
-    await callback.message.edit_text(text, reply_markup=kb)
+    await _safe_edit_card(callback, text, kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -672,8 +686,7 @@ async def admin_cancel_delete_order(callback: CallbackQuery, state: FSMContext):
     except (IndexError, ValueError):
         await callback.answer()
         return
-    callback.data = f"ord:{order_id}"
-    await order_select(callback, state)
+    await _render_order_card(callback, state, order_id=order_id)
 
 
 @router.callback_query(F.data.startswith("adel_yes:"))
