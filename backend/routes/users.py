@@ -87,13 +87,19 @@ async def delete_user(
     telegram_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete user by telegram_id."""
+    """Disable user by telegram_id (soft delete).
+
+    Нельзя физически удалять пользователя, т.к. на него ссылаются заявки (orders.author_id NOT NULL).
+    Вместо удаления переводим пользователя в роль, которая не имеет доступа к боту.
+    """
     stmt = select(User).where(User.telegram_id == telegram_id)
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    await db.delete(user)
+    user.role = "blocked"
+    user.username = None
+    user.full_name = None
     await db.flush()
     return None
 
