@@ -479,6 +479,7 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                 admin_labels=admin_buttons,
                 filters_collapsed=True,
             )
+            return
         # Фильтр для «Моих заявок» (пользователь или админ)
         else:
             is_admin_in_my = data.get("is_admin_in_my", False)

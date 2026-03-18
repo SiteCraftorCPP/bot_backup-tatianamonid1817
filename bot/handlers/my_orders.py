@@ -318,11 +318,16 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
     mode = data.get("mode", "my")
     user_id = callback.from_user.id
 
-    # Если state потерялся/очистился, но кнопка нажата в сообщении "История заявок",
-    # то это точно history-flow, а не "Мои заявки".
+    # Если state потерялся/очистился, определяем режим по самой клавиатуре:
+    # в истории заявок есть кнопки фильтра админов (admflt:*), в моих заявках их нет.
     try:
-        msg_text = (callback.message.text or "") if callback.message else ""
-        if mode != "history" and ("История заявок" in msg_text):
+        kb = callback.message.reply_markup.inline_keyboard if (callback.message and callback.message.reply_markup) else []
+        has_admin_filters = any(
+            (btn.callback_data or "").startswith("admflt:")
+            for row in kb
+            for btn in row
+        )
+        if has_admin_filters:
             mode = "history"
     except Exception:
         pass
