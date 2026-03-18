@@ -323,7 +323,9 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
             selected_admin_id = data.get("admin_filter")
             filters_collapsed = bool(data.get("filters_collapsed", False))
 
-            # 1) Сначала откатываем фильтр по админу (к "Все админы")
+            # 1) Сначала откатываем фильтр по админу (к "Все админы").
+            # При этом возвращаем UI в исходное состояние с видимыми категориями (show_filters=True),
+            # чтобы не прятать категории под одной кнопкой.
             if selected_admin_id is not None:
                 selected_admin_id = None
                 status = None if status_key == "all" else status_key
@@ -349,7 +351,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                         current_filter=status_key,
                         filter_mode="history",
                         admin_labels=admin_buttons,
-                        filters_back_callback="fltmenu",
+                        show_filters=True,
                     ),
                 )
                 await state.update_data(
@@ -359,11 +361,11 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                     status_filter=status_key,
                     admin_filter=None,
                     admin_labels=admin_buttons,
-                    filters_collapsed=True,
+                    filters_collapsed=False,
                 )
                 return
 
-            # 2) Потом откатываем фильтр статуса (к "Все")
+            # 2) Потом откатываем фильтр статуса (к "Все") и тоже возвращаем исходный UI.
             if filters_collapsed and status_key != "all":
                 status_key = "all"
                 orders = await get_orders(admin=True, limit=100)
@@ -384,11 +386,10 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                         page=0,
                         has_next=has_next,
                         prefix="ord",
-                        show_filters=False,
+                        show_filters=True,
                         current_filter="all",
                         filter_mode="history",
                         admin_labels=admin_buttons,
-                        filters_back_callback="fltmenu",
                     ),
                 )
                 await state.update_data(
@@ -398,7 +399,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                     status_filter="all",
                     admin_filter=None,
                     admin_labels=admin_buttons,
-                    filters_collapsed=True,
+                    filters_collapsed=False,
                 )
                 return
 
