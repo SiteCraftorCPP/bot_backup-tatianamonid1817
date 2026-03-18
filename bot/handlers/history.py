@@ -228,6 +228,7 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
         return
 
     data = await state.get_data()
+    filters_collapsed = bool(data.get("filters_collapsed", False))
     status_key = data.get("status_filter") or "all"
     status = None if status_key == "all" else status_key
     selected_admin_id = data.get("admin_filter")
@@ -309,6 +310,7 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
         return
 
     data = await state.get_data()
+    filters_collapsed = bool(data.get("filters_collapsed", False))
     status_key = data.get("status_filter") or "all"
     status = None if status_key == "all" else status_key
 
@@ -336,7 +338,12 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
         admins_tuples = await _load_admins_tuples()
         full_orders = await get_orders(admin=True, limit=100)
         user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
-        admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=selected_admin_id)
+        admin_buttons = _build_admin_filter_buttons(
+            admins_tuples,
+            user_to_index,
+            selected_admin_id=selected_admin_id,
+            collapse_others_when_selected=True,
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception("Admin filter failed: %s", e)
         await callback.answer("Ошибка загрузки.", show_alert=True)
@@ -350,11 +357,11 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
                 page=0,
                 has_next=False,
                 prefix="ord",
-                show_filters=False,
+                show_filters=not filters_collapsed,
                 current_filter=status_key,
                 filter_mode="history",
                 admin_labels=admin_buttons,
-                filters_back_callback="fltmenu",
+                filters_back_callback=("fltmenu" if filters_collapsed else None),
                 filters_back_text=_pretty_status_key(status_key),
             ),
         )
@@ -376,11 +383,11 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
                 page=0,
                 has_next=has_next,
                 prefix="ord",
-                show_filters=False,
+                show_filters=not filters_collapsed,
                 current_filter=status_key,
                 filter_mode="history",
                 admin_labels=admin_buttons,
-                filters_back_callback="fltmenu",
+                filters_back_callback=("fltmenu" if filters_collapsed else None),
                 filters_back_text=_pretty_status_key(status_key),
             ),
         )
@@ -392,7 +399,7 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
         status_filter=status_key,
         admin_filter=selected_admin_id,
         admin_labels=admin_buttons,
-        filters_collapsed=True,
+        filters_collapsed=filters_collapsed,
     )
     await callback.answer()
 

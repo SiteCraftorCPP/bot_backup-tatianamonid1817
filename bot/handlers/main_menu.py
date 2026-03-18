@@ -132,7 +132,11 @@ async def stats_choose_mode(callback: CallbackQuery, state: FSMContext):
                 lines.append(f"- {label}: {row.get('orders_count', 0)}")
 
         await callback.answer()
-        await callback.message.edit_text("\n".join(lines), parse_mode="HTML")
+        await callback.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=stats_mode_inline_kb(),
+        )
         return
 
     if mode == "period":

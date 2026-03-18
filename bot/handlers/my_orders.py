@@ -255,6 +255,19 @@ async def order_select(callback: CallbackQuery, state: FSMContext):
     order_id = int(callback.data.split(":")[1])
     await _render_order_card(callback, state, order_id=order_id)
 
+    # Режим и права для выбора файла
+    data = await state.get_data()
+    mode = data.get("mode", "my")
+    adm = await is_admin(callback.from_user.id) if callback.from_user else False
+
+    # Нужен номер заявки для имени файла/подписи
+    try:
+        order = await get_order(order_id)
+    except Exception:
+        order = None
+    if not order:
+        return
+
     # Для администратора:
     # - в истории заявок шлём админский файл МаркЗнак;
     # - в «моих заявках» шлём пользовательский файл заявки.
@@ -347,11 +360,10 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                         page=0,
                         has_next=has_next,
                         prefix="ord",
-                        show_filters=False,
+                        show_filters=True,
                         current_filter=status_key,
                         filter_mode="history",
                         admin_labels=admin_buttons,
-                        show_filters=True,
                     ),
                 )
                 await state.update_data(

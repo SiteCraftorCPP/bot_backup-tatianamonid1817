@@ -113,8 +113,39 @@ async def ylink_enter_url(message: Message, state: FSMContext):
         await message.answer("Ошибка: заявка не выбрана. Начните заново.")
         await state.clear()
         return
+
+    # Строго: прикреплять ссылку может только ответственный админ.
+    # Если ответственный уже назначен на другого — блокируем с причиной.
     try:
-        updated = await update_order(order_id, yandex_link=url)
+        current = await get_order(int(order_id))
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Get order before ylink update failed: %s", e)
+        await message.answer("Ошибка загрузки заявки. Попробуйте позже.")
+        return
+    if not current:
+        await message.answer("Заявка не найдена.")
+        await state.clear()
+        return
+
+    actor_id = message.from_user.id if message.from_user else 0
+    actor_username = message.from_user.username if message.from_user else None
+    resp_id = current.get("responsible_telegram_id")
+    resp_username = current.get("responsible_username")
+    if resp_id and int(resp_id) != int(actor_id):
+        who = f"@{resp_username}" if resp_username else str(resp_id)
+        await message.answer(
+            "Нельзя прикрепить ссылку: вы не являетесь ответственным по этой заявке.\n"
+            f"Ответственный: {who}\n\n"
+            "Сначала поменяйте ответственного, затем прикрепляйте ссылку."
+        )
+        return
+    try:
+        payload_kwargs = {"yandex_link": url}
+        # Если ответственный ещё не назначен — назначаем текущего админа.
+        if (not resp_id) and actor_id:
+            payload_kwargs["responsible_telegram_id"] = actor_id
+            payload_kwargs["responsible_username"] = actor_username
+        updated = await update_order(order_id, **payload_kwargs)
     except Exception as e:
         logger.exception("Update order failed: %s", e)
         await message.answer("Ошибка при сохранении ссылки. Попробуйте позже.")
@@ -215,6 +246,25 @@ async def ysend_yes(callback: CallbackQuery):
     if not updated:
         await callback.answer("Заявка не найдена.", show_alert=True)
         return
+
+    # Уведомление автору: заявка готова, ссылка прикреплена
+    try:
+        author_id = order.get("author_telegram_id")
+        if author_id:
+            text_parts = [f"Ваша заявка №{updated.get('number') or order.get('number')} готова."]
+            link = order.get("yandex_link") or updated.get("yandex_link")
+            if link:
+                text_parts.append(f"Ссылка на файлы: {link}")
+            await callback.bot.send_message(chat_id=author_id, text="\n".join(text_parts))
+    except Exception as e:  # noqa: BLE001
+        # Не ломаем сценарий, но админа предупреждаем, если уведомление не дошло
+        logger.warning("Notify order author failed (order_id=%s): %s", order_id, e)
+        try:
+            await callback.message.answer(
+                "Статус поменял на «отправлена», но автору не смог отправить сообщение (возможно, пользователь не запускал бота)."
+            )
+        except Exception:
+            pass
 
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
