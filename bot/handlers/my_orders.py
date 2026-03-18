@@ -831,6 +831,9 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Заявка не найдена.", show_alert=True)
         return
 
+    old_resp_id = order_before.get("responsible_telegram_id")
+    old_resp_username = order_before.get("responsible_username")
+
     # Пытаемся получить username из БД, чтобы красиво показать в карточке.
     username: str | None
     try:
@@ -900,11 +903,20 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         # username для нового ответственного: берём из свежего апдейта, иначе из user, иначе id.
         new_resp_username = username or (user.get("username") if user else None)
         new_label = f"@{new_resp_username}" if new_resp_username else str(new_resp_id)
-        text = (
-            f"{changer_label} скорректировал ответственного заявки №{order['number']} "
-            f"на {new_label}"
+        text_new = (
+            f"Вам передана заявка №{order['number']}.\n"
+            f"Ответственного назначил: {changer_label}"
         )
-        await callback.bot.send_message(chat_id=new_resp_id, text=text)
+        await callback.bot.send_message(chat_id=new_resp_id, text=text_new)
+
+        # Уведомление админу, с которого сняли заявку.
+        if old_resp_id and int(old_resp_id) != int(new_resp_id):
+            old_label = f"@{old_resp_username}" if old_resp_username else str(old_resp_id)
+            text_old = (
+                f"{changer_label} скорректировал ответственного заявки №{order['number']} "
+                f"с {old_label} на {new_label}."
+            )
+            await callback.bot.send_message(chat_id=int(old_resp_id), text=text_old)
     except Exception as e:
         logger.exception("Notify new responsible failed: %s", e)
 
