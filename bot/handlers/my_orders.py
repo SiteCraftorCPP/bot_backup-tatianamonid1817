@@ -1314,7 +1314,25 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
     # восстанавливаем список заново, чтобы «Назад» всегда работал.
     if not orders and callback.from_user:
         try:
-            if await is_admin(callback.from_user.id):
+            # Если возвращаемся из истории заявок, это видно по клавиатуре/заголовку,
+            # даже если проверка is_admin() временно дала False.
+            try:
+                kb = (
+                    callback.message.reply_markup.inline_keyboard
+                    if (callback.message and callback.message.reply_markup)
+                    else []
+                )
+                has_admin_filters = any(
+                    (btn.callback_data or "").startswith("admflt:")
+                    for row in kb
+                    for btn in row
+                )
+            except Exception:
+                has_admin_filters = False
+            msg_text = (callback.message.text or callback.message.caption or "") if callback.message else ""
+            from_history_context = has_admin_filters or ("История заявок" in msg_text)
+
+            if from_history_context or await is_admin(callback.from_user.id):
                 mode = "history"
                 status_filter = status_filter or "all"
                 status = None if status_filter == "all" else status_filter
