@@ -892,33 +892,48 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
     )
 
-    # Уведомление новому администратору о передаче заявки.
-    try:
-        changer_id = callback.from_user.id if callback.from_user else new_resp_id
-        changer_username = (
-            callback.from_user.username if (callback.from_user and callback.from_user.username) else None
-        )
-        changer_label = f"@{changer_username}" if changer_username else str(changer_id)
+    changer_id = callback.from_user.id if callback.from_user else new_resp_id
+    changer_username = (
+        callback.from_user.username if (callback.from_user and callback.from_user.username) else None
+    )
+    changer_label = f"@{changer_username}" if changer_username else str(changer_id)
 
-        # username для нового ответственного: берём из свежего апдейта, иначе из user, иначе id.
-        new_resp_username = username or (user.get("username") if user else None)
-        new_label = f"@{new_resp_username}" if new_resp_username else str(new_resp_id)
+    # username для нового ответственного: берём из свежего апдейта, иначе из user, иначе id.
+    new_resp_username = username or (user.get("username") if user else None)
+    new_label = f"@{new_resp_username}" if new_resp_username else str(new_resp_id)
+
+    # 1) Уведомление новому администратору о передаче заявки.
+    try:
         text_new = (
             f"Вам передана заявка №{order['number']}.\n"
             f"Ответственного назначил: {changer_label}"
         )
         await callback.bot.send_message(chat_id=new_resp_id, text=text_new)
+    except Exception as e:
+        logger.exception("Notify new responsible failed: %s", e)
+        # Частая причина: пользователь ещё не писал боту → Telegram запрещает писать первым.
+        try:
+            await callback.bot.send_message(
+                chat_id=changer_id,
+                text=(
+                    f"Не смог уведомить {new_label} о передаче заявки №{order['number']}.\n"
+                    f"Пусть он/она нажмёт /start у бота, и повторите назначение."
+                ),
+            )
+        except Exception:
+            pass
 
-        # Уведомление админу, с которого сняли заявку.
-        if old_resp_id and int(old_resp_id) != int(new_resp_id):
+    # 2) Уведомление админу, с которого сняли заявку.
+    if old_resp_id and int(old_resp_id) != int(new_resp_id):
+        try:
             old_label = f"@{old_resp_username}" if old_resp_username else str(old_resp_id)
             text_old = (
                 f"{changer_label} скорректировал ответственного заявки №{order['number']} "
                 f"с {old_label} на {new_label}."
             )
             await callback.bot.send_message(chat_id=int(old_resp_id), text=text_old)
-    except Exception as e:
-        logger.exception("Notify new responsible failed: %s", e)
+        except Exception as e:
+            logger.exception("Notify old responsible failed: %s", e)
 
     await callback.answer("Ответственный обновлён.")
 
