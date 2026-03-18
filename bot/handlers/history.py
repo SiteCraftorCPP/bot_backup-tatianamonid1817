@@ -18,14 +18,119 @@ ORDERS_PER_PAGE = 8
 @router.callback_query(F.data == "hist_back")
 async def history_back(callback: CallbackQuery, state: FSMContext):
     """Назад в истории заявок (свой callback без коллизий с 'Мои заявки')."""
-    # Дальше используем уже существующую логику отката шагов из my_orders.py
-    # (там есть корректный "степ-бэк" по фильтрам истории).
+    if not callback.from_user:
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    user_id = callback.from_user.id
+    if not await _is_admin(user_id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+
+    from bot.handlers.my_orders import _safe_edit_card  # local import to avoid cycles
+
+    data = await state.get_data()
+    status_key = data.get("status_filter") or "all"
+    status = None if status_key == "all" else status_key
+    selected_admin_id = data.get("admin_filter")
+    filters_collapsed = bool(data.get("filters_collapsed", False))
+
     try:
-        await state.update_data(mode="history")
-    except Exception:
-        pass
-    from bot.handlers.my_orders import ord_list_back_to_main  # local import to избежать циклов
-    await ord_list_back_to_main(callback, state)
+        admins_tuples = await _load_admins_tuples()
+        full_orders = await get_orders(admin=True, limit=100)
+        user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
+
+        # 1) Сначала откатываем фильтр по админу (к "Все админы")
+        if selected_admin_id is not None:
+            selected_admin_id = None
+            orders = await get_orders(admin=True, status=status, limit=100)
+            admin_buttons = _build_admin_filter_buttons(
+                admins_tuples,
+                user_to_index,
+                selected_admin_id=None,
+                collapse_others_when_selected=True,
+            )
+            items = [(o["id"], o["number"], o["status"]) for o in orders]
+            has_next = len(orders) > ORDERS_PER_PAGE
+            title = f"==================================================\nИстория заявок ({status or 'все'}):"
+            await _safe_edit_card(
+                callback,
+                f"{title}\n\nВыберите заявку для просмотра:",
+                orders_list_inline(
+                    items,
+                    page=0,
+                    has_next=has_next,
+                    prefix="ord",
+                    show_filters=not filters_collapsed,
+                    current_filter=status_key,
+                    filter_mode="history",
+                    admin_labels=admin_buttons,
+                    filters_back_callback=("fltmenu" if filters_collapsed else None),
+                    filters_back_text=_pretty_status_key(status_key),
+                    back_callback="hist_back",
+                ),
+            )
+            await state.update_data(
+                orders=orders,
+                page=0,
+                mode="history",
+                status_filter=status_key,
+                admin_filter=None,
+                admin_labels=admin_buttons,
+                filters_collapsed=filters_collapsed,
+            )
+            await callback.answer()
+            return
+
+        # 2) Потом откатываем статус (к "Все")
+        if status_key != "all":
+            status_key = "all"
+            status = None
+            orders = await get_orders(admin=True, limit=100)
+            admin_buttons = _build_admin_filter_buttons(
+                admins_tuples,
+                user_to_index,
+                selected_admin_id=None,
+                collapse_others_when_selected=True,
+            )
+            items = [(o["id"], o["number"], o["status"]) for o in orders]
+            has_next = len(orders) > ORDERS_PER_PAGE
+            title = "==================================================\nИстория заявок (все):"
+            await _safe_edit_card(
+                callback,
+                f"{title}\n\nВыберите заявку для просмотра:",
+                orders_list_inline(
+                    items,
+                    page=0,
+                    has_next=has_next,
+                    prefix="ord",
+                    show_filters=True,
+                    current_filter="all",
+                    filter_mode="history",
+                    admin_labels=admin_buttons,
+                    back_callback="hist_back",
+                ),
+            )
+            await state.update_data(
+                orders=orders,
+                page=0,
+                mode="history",
+                status_filter="all",
+                admin_filter=None,
+                admin_labels=admin_buttons,
+                filters_collapsed=False,
+            )
+            await callback.answer()
+            return
+
+    except Exception as e:  # noqa: BLE001
+        logger.exception("hist_back failed: %s", e)
+
+    # дефолт: главное меню (и чистим state истории)
+    await state.clear()
+    is_adm = await _is_admin(user_id)
+    await _safe_edit_card(callback, "Главное меню:", None)
+    await callback.message.answer("Главное меню:", reply_markup=main_menu_kb(is_admin=is_adm))
+    await callback.answer()
 
 
 def _user_visible_status(status: str) -> str:
