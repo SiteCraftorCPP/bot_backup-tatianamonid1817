@@ -416,6 +416,24 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     status_key = callback.data.split(":", 1)[1]
     status = None if status_key == "all" else status_key
+
+    # Если FSM state слетел, но клик был в "Истории заявок" (там есть admflt:*),
+    # то это history-flow, иначе этот хендлер уедет в ветку "Мои заявки" и перезапишет mode.
+    try:
+        kb = (
+            callback.message.reply_markup.inline_keyboard
+            if (callback.message and callback.message.reply_markup)
+            else []
+        )
+        has_admin_filters = any(
+            (btn.callback_data or "").startswith("admflt:")
+            for row in kb
+            for btn in row
+        )
+        if has_admin_filters:
+            mode = "history"
+    except Exception:
+        pass
     try:
         # История заявок (админ)
         if mode == "history":
