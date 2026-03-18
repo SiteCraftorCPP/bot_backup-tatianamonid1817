@@ -1357,6 +1357,30 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
         except Exception:
             pass
         return
+
+    # Важно: после возврата из карточки в список восстанавливаем state,
+    # иначе следующий «Назад» может отработать как «Мои заявки».
+    try:
+        if mode == "history":
+            await state.update_data(
+                orders=orders,
+                page=page,
+                mode="history",
+                status_filter=(status_filter or "all"),
+                admin_labels=admin_labels,
+                admin_filter=data.get("admin_filter"),
+                filters_collapsed=bool(data.get("filters_collapsed", False)),
+            )
+        else:
+            await state.update_data(
+                orders=orders,
+                page=page,
+                mode="my",
+                status_filter=status_filter,
+                is_admin_in_my=data.get("is_admin_in_my", False),
+            )
+    except Exception:
+        pass
     try:
         await callback.message.delete()
     except Exception:
