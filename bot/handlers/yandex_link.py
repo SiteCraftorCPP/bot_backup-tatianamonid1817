@@ -2,7 +2,7 @@
 import re
 import logging
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 
@@ -150,9 +150,79 @@ async def ylink_enter_url(message: Message, state: FSMContext):
             await message.bot.send_message(chat_id=admin_id, text=admin_text)
         except Exception as e:
             logger.warning("Send link notification to admin %s failed: %s", admin_id, e)
+
+    # После добавления ссылки спрашиваем, отправлять ли заявку.
+    # Важно: вопрос уместен только если ссылка реально есть.
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да", callback_data=f"ysend_yes:{order_id}"),
+                InlineKeyboardButton(text="❌ Нет", callback_data=f"ysend_no:{order_id}"),
+            ]
+        ]
+    )
     await state.clear()
-    uid = message.from_user.id if message.from_user else 0
-    await message.answer(
-        f"Ссылка добавлена. {status_phrase}",
+    await message.answer(f"Ссылка добавлена. {status_phrase}")
+    if updated.get("yandex_link"):
+        await message.answer("Желаете отправить заявку?", reply_markup=kb)
+    else:
+        uid = message.from_user.id if message.from_user else 0
+        await message.answer("Главное меню:", reply_markup=main_menu_kb(is_admin=is_admin(uid)))
+
+
+@router.callback_query(F.data.startswith("ysend_no:"))
+async def ysend_no(callback: CallbackQuery):
+    """Не отправлять: оставляем статус 'готово'."""
+    try:
+        await callback.answer("Ок, оставляю «готово».")
+    except Exception:
+        pass
+    uid = callback.from_user.id if callback.from_user else 0
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer("Главное меню:", reply_markup=main_menu_kb(is_admin=is_admin(uid)))
+
+
+@router.callback_query(F.data.startswith("ysend_yes:"))
+async def ysend_yes(callback: CallbackQuery):
+    """Отправить: меняем статус на 'отправлена' (только если ссылка есть)."""
+    if not callback.from_user:
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    try:
+        order_id = int(callback.data.split(":")[1])
+    except Exception:
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    try:
+        order = await get_order(order_id)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Get order for ysend_yes failed: %s", e)
+        await callback.answer("Ошибка загрузки заявки.", show_alert=True)
+        return
+    if not order or not order.get("yandex_link"):
+        await callback.answer("Ссылка не прикреплена. Отправка невозможна.", show_alert=True)
+        return
+
+    try:
+        updated = await update_order(order_id, status="отправлена")
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Set status sent failed: %s", e)
+        await callback.answer("Ошибка отправки. Попробуйте позже.", show_alert=True)
+        return
+    if not updated:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer("Отправлено.")
+    uid = callback.from_user.id
+    await callback.message.answer(
+        f"Заявка №{updated.get('number')} отправлена.",
         reply_markup=main_menu_kb(is_admin=is_admin(uid)),
     )
