@@ -134,11 +134,26 @@ def _build_admin_filter_buttons(
     admins_tuples: list[tuple[int | None, str]],
     user_to_index: dict,
     selected_admin_id: int | None,
+    *,
+    collapse_others_when_selected: bool = False,
 ) -> list[tuple[str, str]]:
-    """Кнопки фильтрации по админам (ответственным). Всегда возвращает полный список админов."""
+    """Кнопки фильтрации по админам (ответственным).
+
+    Если collapse_others_when_selected=True и выбран конкретный админ, показываем:
+    - «Все админы» (сброс фильтра);
+    - выбранного админа (с ✓).
+    """
     btns: list[tuple[str, str]] = []
     all_suffix = " ✓" if selected_admin_id is None else ""
     btns.append((f"Все админы{all_suffix}", "admflt:all"))
+    if collapse_others_when_selected and selected_admin_id is not None:
+        # Только выбранный админ
+        for tid, uname in admins_tuples:
+            if tid is None or tid != selected_admin_id:
+                continue
+            label = _admin_color_label(tid, uname, user_to_index)
+            btns.append((label + " ✓", f"admflt:{tid}"))
+        return btns
     for tid, uname in admins_tuples:
         if tid is None:
             continue
@@ -221,7 +236,12 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
         admins_tuples = await _load_admins_tuples()
         full_orders = await get_orders(admin=True, limit=100)
         user_to_index, admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
-        admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=selected_admin_id)
+        admin_buttons = _build_admin_filter_buttons(
+            admins_tuples,
+            user_to_index,
+            selected_admin_id=selected_admin_id,
+            collapse_others_when_selected=True,
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception("Get orders failed: %s", e)
         await callback.answer("Ошибка загрузки.", show_alert=True)
