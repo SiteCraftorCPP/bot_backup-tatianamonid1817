@@ -378,6 +378,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                         current_filter=status_key,
                         filter_mode="history",
                         admin_labels=admin_buttons,
+                        back_callback="hist_back",
                     ),
                 )
                 await state.update_data(
@@ -416,6 +417,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                         current_filter="all",
                         filter_mode="history",
                         admin_labels=admin_buttons,
+                        back_callback="hist_back",
                     ),
                 )
                 await state.update_data(
@@ -451,6 +453,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                         current_filter="all",
                         filter_mode="history",
                         admin_labels=admin_buttons,
+                        back_callback="hist_back",
                     ),
                 )
                 await state.update_data(
@@ -564,6 +567,7 @@ async def orders_page(callback: CallbackQuery, state: FSMContext):
     )
     if mode == "history" and filters_collapsed:
         kw["filters_back_callback"] = "fltmenu"
+        kw["back_callback"] = "hist_back"
     await callback.message.edit_reply_markup(
         reply_markup=orders_list_inline(items, page=page, has_next=has_next, prefix="ord", **kw),
     )
@@ -1350,6 +1354,7 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
             "current_filter": status_filter,
             "filter_mode": "history",
             "admin_labels": admin_labels,
+            "back_callback": "hist_back",
         }
     else:
         items = [(o["id"], o["number"], o["status"]) for o in orders]
