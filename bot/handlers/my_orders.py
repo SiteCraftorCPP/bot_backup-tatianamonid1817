@@ -318,6 +318,15 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
     mode = data.get("mode", "my")
     user_id = callback.from_user.id
 
+    # Если state потерялся/очистился, но кнопка нажата в сообщении "История заявок",
+    # то это точно history-flow, а не "Мои заявки".
+    try:
+        msg_text = (callback.message.text or "") if callback.message else ""
+        if mode != "history" and ("История заявок" in msg_text):
+            mode = "history"
+    except Exception:
+        pass
+
     try:
         # ===== History mode (admin) =====
         if mode == "history":
