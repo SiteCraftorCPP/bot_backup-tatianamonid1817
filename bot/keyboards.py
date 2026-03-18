@@ -206,6 +206,7 @@ def orders_list_inline(
     admin_labels: list[tuple[str, str]] | None = None,
     filters_back_callback: str | None = None,
     filters_back_text: str = "« Категории",
+    back_callback: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Inline list of orders for selection.
     filter_mode:
@@ -225,6 +226,8 @@ def orders_list_inline(
         )
 
     if show_filters:
+        # Разные callback-префиксы, чтобы не было коллизий между "Историей" и "Моими заявками".
+        filter_cb_prefix = "hflt" if filter_mode == "history" else "flt"
         if filter_mode == "history":
             filter_btns = [
                 ("Все", "all"),
@@ -248,7 +251,12 @@ def orders_list_inline(
         row = []
         for label, key in filter_btns:
             suffix = " ✓" if current_filter == key else ""
-            row.append(InlineKeyboardButton(text=label + suffix, callback_data=f"flt:{key}"))
+            row.append(
+                InlineKeyboardButton(
+                    text=label + suffix,
+                    callback_data=f"{filter_cb_prefix}:{key}",
+                )
+            )
             if len(row) >= 3:
                 buttons.append(row)
                 row = []
@@ -285,7 +293,14 @@ def orders_list_inline(
         nav.append(InlineKeyboardButton(text="Вперёд ▶", callback_data=f"{prefix}pg:{page+1}"))
     if nav:
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton(text="« Назад", callback_data=f"{prefix}_back")])
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="« Назад",
+                callback_data=(back_callback or f"{prefix}_back"),
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

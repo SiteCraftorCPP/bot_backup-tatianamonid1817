@@ -15,6 +15,19 @@ logger = logging.getLogger(__name__)
 ORDERS_PER_PAGE = 8
 
 
+@router.callback_query(F.data == "hist_back")
+async def history_back(callback: CallbackQuery, state: FSMContext):
+    """Назад в истории заявок (свой callback без коллизий с 'Мои заявки')."""
+    # Дальше используем уже существующую логику отката шагов из my_orders.py
+    # (там есть корректный "степ-бэк" по фильтрам истории).
+    try:
+        await state.update_data(mode="history")
+    except Exception:
+        pass
+    from bot.handlers.my_orders import ord_list_back_to_main  # local import to избежать циклов
+    await ord_list_back_to_main(callback, state)
+
+
 def _user_visible_status(status: str) -> str:
     """Маппинг внутренних статусов в пользовательские (для обычного юзера)."""
     if status == "готово":
@@ -260,6 +273,7 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
                 current_filter=status_key,
                 filter_mode="history",
                 admin_labels=admin_buttons,
+                back_callback="hist_back",
             ),
         )
     else:
@@ -284,6 +298,7 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
                 current_filter=status_key,
                 filter_mode="history",
                 admin_labels=admin_buttons,
+                back_callback="hist_back",
             ),
         )
 
@@ -363,6 +378,7 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
                 admin_labels=admin_buttons,
                 filters_back_callback=("fltmenu" if filters_collapsed else None),
                 filters_back_text=_pretty_status_key(status_key),
+                back_callback="hist_back",
             ),
         )
     else:
@@ -389,6 +405,7 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
                 admin_labels=admin_buttons,
                 filters_back_callback=("fltmenu" if filters_collapsed else None),
                 filters_back_text=_pretty_status_key(status_key),
+                back_callback="hist_back",
             ),
         )
 
@@ -404,9 +421,8 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("flt:"))
-async def orders_filter(callback: CallbackQuery, state: FSMContext):
-    """Apply status filter to orders list (history mode)."""
+async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, status_key: str) -> None:
+    """Apply status filter to orders list (history mode or my orders)."""
     if not callback.from_user:
         await callback.answer("Ошибка.", show_alert=True)
         return
@@ -414,7 +430,6 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     mode = data.get("mode", "my")
     user_id = callback.from_user.id
-    status_key = callback.data.split(":", 1)[1]
     status = None if status_key == "all" else status_key
 
     # Если FSM state слетел, но клик был в "Истории заявок" (там есть admflt:*),
@@ -460,6 +475,7 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                         admin_labels=admin_buttons,
                         filters_back_callback="fltmenu",
                         filters_back_text=_pretty_status_key(status_key),
+                        back_callback="hist_back",
                     ),
                 )
             else:
@@ -486,6 +502,7 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                         admin_labels=admin_buttons,
                         filters_back_callback="fltmenu",
                         filters_back_text=_pretty_status_key(status_key),
+                        back_callback="hist_back",
                     ),
                 )
             await state.update_data(
@@ -609,6 +626,24 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
         return
 
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("flt:"))
+async def orders_filter(callback: CallbackQuery, state: FSMContext):
+    """Фильтр статуса (общий префикс для 'Моих заявок')."""
+    status_key = callback.data.split(":", 1)[1]
+    await _orders_filter_impl(callback, state, status_key=status_key)
+
+
+@router.callback_query(F.data.startswith("hflt:"))
+async def history_orders_filter(callback: CallbackQuery, state: FSMContext):
+    """Фильтр статуса (только для истории заявок, отдельный префикс без коллизий)."""
+    status_key = callback.data.split(":", 1)[1]
+    try:
+        await state.update_data(mode="history")
+    except Exception:
+        pass
+    await _orders_filter_impl(callback, state, status_key=status_key)
 
 
 @router.callback_query(F.data == "admsep")
