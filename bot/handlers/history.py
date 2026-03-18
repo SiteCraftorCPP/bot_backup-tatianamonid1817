@@ -24,6 +24,19 @@ def _user_visible_status(status: str) -> str:
     return status
 
 
+def _pretty_status_key(status_key: str | None) -> str:
+    """Красивое название раздела для UI."""
+    if not status_key or status_key == "all":
+        return "Все"
+    mapping = {
+        "создана": "Создана",
+        "в работе": "В работе",
+        "готово": "Готово",
+        "отправлена": "Отправлена",
+    }
+    return mapping.get(status_key, str(status_key))
+
+
 COLORS = ["🟢", "🟠", "🔵", "🟣", "🟡", "🟤", "🔴", "⚫", "⚪"]
 
 
@@ -322,6 +335,7 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
                 filter_mode="history",
                 admin_labels=admin_buttons,
                 filters_back_callback="fltmenu",
+                filters_back_text=_pretty_status_key(status_key),
             ),
         )
     else:
@@ -347,6 +361,7 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
                 filter_mode="history",
                 admin_labels=admin_buttons,
                 filters_back_callback="fltmenu",
+                filters_back_text=_pretty_status_key(status_key),
             ),
         )
 
@@ -399,6 +414,7 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                         filter_mode="history",
                         admin_labels=admin_buttons,
                         filters_back_callback="fltmenu",
+                        filters_back_text=_pretty_status_key(status_key),
                     ),
                 )
             else:
@@ -424,6 +440,7 @@ async def orders_filter(callback: CallbackQuery, state: FSMContext):
                         filter_mode="history",
                         admin_labels=admin_buttons,
                         filters_back_callback="fltmenu",
+                        filters_back_text=_pretty_status_key(status_key),
                     ),
                 )
             await state.update_data(
