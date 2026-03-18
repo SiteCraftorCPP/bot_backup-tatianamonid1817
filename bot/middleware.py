@@ -22,7 +22,38 @@ class LoggingMiddleware(BaseMiddleware):
     ) -> Any:
         user = getattr(event, "from_user", None)
         if user:
-            logger.info(f"Update from {user.id} @{user.username}: {type(event).__name__}")
+            uname = f"@{user.username}" if getattr(user, "username", None) else ""
+            if isinstance(event, CallbackQuery):
+                cb_data = getattr(event, "data", None)
+                btn_text = None
+                try:
+                    if event.message and event.message.reply_markup:
+                        for row in event.message.reply_markup.inline_keyboard:
+                            for btn in row:
+                                if btn.callback_data == cb_data:
+                                    btn_text = btn.text
+                                    raise StopIteration
+                except StopIteration:
+                    pass
+                msg_head = ""
+                try:
+                    msg_text = (event.message.text or event.message.caption or "") if event.message else ""
+                    msg_head = msg_text.replace("\n", " ")[:120]
+                except Exception:
+                    msg_head = ""
+                logger.info(
+                    "Update from %s %s: CallbackQuery data=%r btn=%r msg=%r",
+                    user.id,
+                    uname,
+                    cb_data,
+                    btn_text,
+                    msg_head,
+                )
+            elif isinstance(event, Message):
+                txt = (event.text or event.caption or "").replace("\n", " ")[:200]
+                logger.info("Update from %s %s: Message text=%r", user.id, uname, txt)
+            else:
+                logger.info("Update from %s %s: %s", user.id, uname, type(event).__name__)
         return await handler(event, data)
 
 
