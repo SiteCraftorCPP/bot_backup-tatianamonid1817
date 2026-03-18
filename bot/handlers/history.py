@@ -217,6 +217,7 @@ async def history_orders(message: Message, state: FSMContext):
             current_filter="all",
             filter_mode="history",
             admin_labels=admin_buttons,
+            back_callback="hist_back",
         ),
     )
     await state.update_data(
