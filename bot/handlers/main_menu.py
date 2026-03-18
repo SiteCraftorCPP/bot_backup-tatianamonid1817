@@ -202,14 +202,9 @@ async def stats_period_apply(message: Message, state: FSMContext):
     # Остаёмся в режиме "Период", чтобы админ мог ввести новый диапазон без выхода в старт.
     await state.set_state(StatsStates.waiting_for_period)
     await state.update_data(last_date_from=date_from, last_date_to=date_to)
-    await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=stats_mode_inline_kb())
-    await message.answer(
-        "Введите новый период в формате <code>с 01.03.26 по 16.03.26</code> или "
-        "<code>01.03.26 16.03.26</code>.\n"
-        "Для выхода нажмите «Отмена».",
-        parse_mode="HTML",
-        reply_markup=stats_mode_inline_kb(),
-    )
+    # В сообщении со статистикой — кнопка "Изменить период", чтобы не слать второе сообщение-инструкцию.
+    kb = stats_mode_inline_kb()
+    await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
 
 
 @router.message(F.text == "❓ Помощь")
