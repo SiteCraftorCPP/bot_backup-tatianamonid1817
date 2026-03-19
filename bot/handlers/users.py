@@ -28,6 +28,16 @@ async def _is_admin(telegram_id: int) -> bool:
     return bool(user and str(user.get("role")) == "admin")
 
 
+def _normalize_username(username: str | None) -> str | None:
+    """Нормализация username из /add_admin: убираем @ и пробелы."""
+    if username is None:
+        return None
+    value = username.strip()
+    if value.startswith("@"):
+        value = value[1:].strip()
+    return value or None
+
+
 def _remove_admin_id_from_env(telegram_id: int) -> bool:
     """Удалить telegram_id из ADMIN_IDS в .env (если присутствует).
 
@@ -203,15 +213,20 @@ async def cmd_add_admin(message: Message, state: FSMContext) -> None:
     # Вариант 2: /add_admin <id> [@username]
     if len(parts) >= 2 and parts[1].isdigit():
         telegram_id = int(parts[1])
-        username_arg = parts[2] if len(parts) >= 3 else None
-        if username_arg and username_arg.startswith("@"):
-            username_arg = username_arg[1:]
+        username_arg = _normalize_username(parts[2] if len(parts) >= 3 else None)
         try:
             try:
                 existing = await api_client.get_user(telegram_id)
             except Exception:
                 existing = None
-            username = username_arg or (existing.get("username") if existing else None)
+            username = username_arg or _normalize_username(existing.get("username") if existing else None)
+            if not username:
+                await message.answer(
+                    "Для /add_admin укажите username: "
+                    "<code>/add_admin 6933111964 @AmbassadorSoft1</code>",
+                    parse_mode="HTML",
+                )
+                return
             full_name = existing.get("full_name") if existing else None
 
             data = await api_client.upsert_user(
@@ -262,16 +277,21 @@ async def handle_admin_data(message: Message, state: FSMContext) -> None:
         return
 
     telegram_id = int(parts[0])
-    username_arg = parts[1] if len(parts) >= 2 else None
-    if username_arg and username_arg.startswith("@"):
-        username_arg = username_arg[1:]
+    username_arg = _normalize_username(parts[1] if len(parts) >= 2 else None)
 
     try:
         try:
             existing = await api_client.get_user(telegram_id)
         except Exception:
             existing = None
-        username = username_arg or (existing.get("username") if existing else None)
+        username = username_arg or _normalize_username(existing.get("username") if existing else None)
+        if not username:
+            await message.answer(
+                "Для добавления админа укажите username: "
+                "<code>6933111964 @AmbassadorSoft1</code>",
+                parse_mode="HTML",
+            )
+            return
         full_name = existing.get("full_name") if existing else None
 
         data = await api_client.upsert_user(

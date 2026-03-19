@@ -30,6 +30,16 @@ _NAV_BUTTON_TEXTS = {
     "« Назад",
 }
 
+
+def _stats_user_label(row: dict) -> str:
+    """Вернуть label только по username (без показа telegram_id)."""
+    uname = str(row.get("username") or "").strip()
+    if uname.startswith("@"):
+        uname = uname[1:].strip()
+    if uname:
+        return f"@{uname}"
+    return "@unknown_user"
+
 class StatsStates(StatesGroup):
     waiting_for_period = State()
 
@@ -134,18 +144,14 @@ async def stats_choose_mode(callback: CallbackQuery, state: FSMContext):
             lines.append("")
             lines.append("👤 По пользователям (создали заявок):")
             for row in by_user:
-                uname = row.get("username") or ""
-                tid = row.get("telegram_id")
-                label = f"@{uname}" if uname else str(tid)
+                label = _stats_user_label(row)
                 lines.append(f"- {label}: {row.get('orders_count', 0)}")
 
         if by_admin:
             lines.append("")
             lines.append("👨‍💼 По администраторам (выполнили заявок):")
             for row in by_admin:
-                uname = row.get("username") or ""
-                tid = row.get("telegram_id")
-                label = f"@{uname}" if uname else str(tid)
+                label = _stats_user_label(row)
                 lines.append(f"- {label}: {row.get('orders_count', 0)}")
 
         await callback.answer()
@@ -213,17 +219,13 @@ async def stats_period_apply(message: Message, state: FSMContext):
         lines.append("")
         lines.append("👤 По пользователям (создали заявок):")
         for row in by_user:
-            uname = row.get("username") or ""
-            tid = row.get("telegram_id")
-            label = f"@{uname}" if uname else str(tid)
+            label = _stats_user_label(row)
             lines.append(f"- {label}: {row.get('orders_count', 0)}")
     if by_admin:
         lines.append("")
         lines.append("👨‍💼 По администраторам (выполнили заявок):")
         for row in by_admin:
-            uname = row.get("username") or ""
-            tid = row.get("telegram_id")
-            label = f"@{uname}" if uname else str(tid)
+            label = _stats_user_label(row)
             lines.append(f"- {label}: {row.get('orders_count', 0)}")
 
     # Остаёмся в режиме "Период", чтобы админ мог ввести новый диапазон без выхода в старт.
