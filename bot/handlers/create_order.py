@@ -27,6 +27,8 @@ from bot.keyboards import (
 )
 from bot.api_client import (
     create_order_from_template,
+    get_user,
+    upsert_user,
     get_new_template_excel,
     get_markznak_order_excel,
     get_brands,
@@ -248,6 +250,19 @@ async def process_new_template_file(message: Message, state: FSMContext):
     if not user:
         await message.answer("Ошибка: не удалось определить пользователя.")
         return
+    # Сохраняем/обновляем автора в БД до создания заявки, чтобы статистика показывала @username.
+    try:
+        existing = await get_user(user.id)
+        role = (existing.get("role") if existing else None) or ("admin" if is_admin(user.id) else "user")
+        await upsert_user(
+            telegram_id=user.id,
+            username=user.username,
+            full_name=user.full_name,
+            role=str(role),
+        )
+    except Exception:
+        # Не блокируем создание заявки, если синк не удался
+        pass
     try:
         order = await create_order_from_template(
             file_bytes=file_bytes,
@@ -511,6 +526,18 @@ async def process_confirm(message: Message, state: FSMContext):
         "comment": data.get("comment"),
         "items": items,
     }
+    # Сохраняем/обновляем автора в БД до создания заявки, чтобы статистика показывала @username.
+    try:
+        existing = await get_user(user.id)
+        role = (existing.get("role") if existing else None) or ("admin" if is_admin(user.id) else "user")
+        await upsert_user(
+            telegram_id=user.id,
+            username=user.username,
+            full_name=user.full_name,
+            role=str(role),
+        )
+    except Exception:
+        pass
     try:
         order = await create_order(payload)
     except Exception as e:

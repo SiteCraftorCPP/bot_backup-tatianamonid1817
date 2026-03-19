@@ -30,6 +30,8 @@ from bot.api_client import (
     create_order_from_template,
     get_markznak_order_excel,
     get_brands,
+    get_user,
+    upsert_user,
 )
 from bot.notification_registry import notifications_registry
 from config import get_settings
@@ -389,6 +391,18 @@ async def process_template_file(message: Message, state: FSMContext):
 
     await message.answer("Обрабатываю...")
     data = await state.get_data()
+    # Сохраняем/обновляем автора в БД до создания заявки, чтобы статистика показывала @username.
+    try:
+        existing = await get_user(user.id)
+        role = (existing.get("role") if existing else None) or "user"
+        await upsert_user(
+            telegram_id=user.id,
+            username=user.username,
+            full_name=user.full_name,
+            role=str(role),
+        )
+    except Exception:
+        pass
     try:
         order = await create_order_from_template(
             file_bytes=file_bytes,
