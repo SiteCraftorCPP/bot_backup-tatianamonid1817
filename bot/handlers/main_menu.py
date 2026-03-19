@@ -1,10 +1,12 @@
 """Main menu and start handler."""
 import logging
+import re
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart
+from aiogram.dispatcher.event.bases import SkipHandler
 
 from config import get_settings
 from bot.keyboards import main_menu_kb, stats_mode_inline_kb
@@ -12,6 +14,21 @@ from bot import api_client
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+_PERIOD_DATE_RE = re.compile(r"\b(\d{2}\.\d{2}\.\d{2})\b")
+
+# Тексты кнопок/команд, которые должны переключать раздел даже во время ввода периода.
+_NAV_BUTTON_TEXTS = {
+    "📜 История заявок",
+    "📦 Мои заявки",
+    "📝 Заявка по шаблону",
+    "📎 Прикрепить файл",
+    "🔗 Добавить ссылку на файлы",
+    "👤 Управление пользователями",
+    "📊 Статистика",
+    "❓ Помощь",
+    "« Назад",
+}
 
 class StatsStates(StatesGroup):
     waiting_for_period = State()
@@ -164,9 +181,15 @@ async def stats_period_apply(message: Message, state: FSMContext):
         await message.answer("Доступно только администраторам.")
         return
     text = (message.text or "").strip()
+
+    # Не блокируем навигацию: при выборе другого раздела выходим из режима периода
+    # и пропускаем апдейт в соответствующий хендлер.
+    if text in _NAV_BUTTON_TEXTS or text.startswith("/"):
+        await state.clear()
+        raise SkipHandler()
+
     # Достаём 2 даты дд.мм.гг
-    import re
-    m = re.findall(r"\b(\d{2}\.\d{2}\.\d{2})\b", text)
+    m = _PERIOD_DATE_RE.findall(text)
     if len(m) < 2:
         await message.answer("Не понял период. Пример: <code>с 01.03.26 по 16.03.26</code>", parse_mode="HTML")
         return
