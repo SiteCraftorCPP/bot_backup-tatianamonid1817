@@ -106,16 +106,17 @@ async def cmd_add_user(message: Message, state: FSMContext) -> None:
 
     text = (message.text or "").strip()
     parts = text.split()
-    # Вариант 2: /add_user <id>
+    # Вариант 2: /add_user <id> [@username]
     if len(parts) >= 2 and parts[1].isdigit():
         telegram_id = int(parts[1])
+        username_arg = _normalize_username(parts[2] if len(parts) >= 3 else None)
         try:
             # Пытаемся сначала получить текущие username/full_name из БД.
             try:
                 existing = await api_client.get_user(telegram_id)
             except Exception:
                 existing = None
-            username = (existing.get("username") if existing else None)
+            username = username_arg or _normalize_username(existing.get("username") if existing else None)
             full_name = existing.get("full_name") if existing else None
 
             data = await api_client.upsert_user(
@@ -159,19 +160,21 @@ async def handle_user_data(message: Message, state: FSMContext) -> None:
     parts = text.split()
     if not parts or not parts[0].isdigit():
         await message.answer(
-            "ID должен быть числом. Пример: <code>7600749840</code>",
+            "ID должен быть числом. Пример: <code>7600749840</code> или "
+            "<code>7600749840 @username</code>",
             parse_mode="HTML",
         )
         return
 
     telegram_id = int(parts[0])
+    username_arg = _normalize_username(parts[1] if len(parts) >= 2 else None)
 
     try:
         try:
             existing = await api_client.get_user(telegram_id)
         except Exception:
             existing = None
-        username = (existing.get("username") if existing else None)
+        username = username_arg or _normalize_username(existing.get("username") if existing else None)
         full_name = existing.get("full_name") if existing else None
 
         data = await api_client.upsert_user(
