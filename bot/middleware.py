@@ -80,20 +80,42 @@ class AccessMiddleware(BaseMiddleware):
 
         settings = get_settings()
         if telegram_id in settings.admin_ids_list:
+            # Админ из конфигурации: по возможности синхронизируем username/full_name в БД.
+            if from_user:
+                try:
+                    await api_client.upsert_user(
+                        telegram_id=telegram_id,
+                        username=getattr(from_user, "username", None),
+                        full_name=getattr(from_user, "full_name", None),
+                        role="admin",
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("Sync admin user in AccessMiddleware failed: %s", e)
             return await handler(event, data)
 
         allowed = False
-        is_admin = False
+        role: str | None = None
         try:
             user = await api_client.get_user(telegram_id)
             if user:
                 role = str(user.get("role") or "")
                 allowed = role in ("user", "admin")
-                is_admin = role == "admin"
         except Exception as e:  # noqa: BLE001
             logger.warning("Access check failed for %s: %s", telegram_id, e)
 
         if allowed:
+            # Пользователь уже есть в БД и имеет доступ (user/admin).
+            # Синхронизируем его актуальный username/full_name для корректной статистики.
+            if from_user and role:
+                try:
+                    await api_client.upsert_user(
+                        telegram_id=telegram_id,
+                        username=getattr(from_user, "username", None),
+                        full_name=getattr(from_user, "full_name", None),
+                        role=role,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("Sync user in AccessMiddleware failed: %s", e)
             return await handler(event, data)
 
         text = "Доступ к боту закрыт.\nОбратитесь к администратору, чтобы вас добавили."
