@@ -229,10 +229,11 @@ async def process_new_gender(message: Message, state: FSMContext):
 
 @router.message(StateFilter("create_order:new_template_file"), F.text == "« Назад")
 async def new_template_back(message: Message, state: FSMContext):
-    """Отмена создания заявки по новому шаблону — возврат в главное меню."""
-    await state.clear()
-    uid = message.from_user.id if message.from_user else 0
-    await message.answer("Главное меню:", reply_markup=main_menu_kb(is_admin=is_admin(uid)))
+    """Шаг назад внутри создания заявки по НОВОМУ шаблону."""
+    # Возвращаемся на шаг выбора пола, чтобы шаблон мог быть перегенерирован.
+    await state.update_data(target_gender=None)
+    await state.set_state("create_order:new_gender")
+    await message.answer("Введите целевой пол (МУЖСКОЙ / ЖЕНСКИЙ):")
 
 
 @router.message(StateFilter("create_order:new_template_file"), F.document)

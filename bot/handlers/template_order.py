@@ -28,6 +28,7 @@ from bot.api_client import (
     get_template_excel,
     get_new_template_excel,
     create_order_from_template,
+    delete_order,
     get_markznak_order_excel,
     get_brands,
     get_user,
@@ -350,10 +351,35 @@ async def template_comment_set(message: Message, state: FSMContext):
 
 @router.message(StateFilter("template:await_file"), F.text == "« Назад")
 async def template_file_back(message: Message, state: FSMContext):
-    await state.clear()
-    from bot.handlers.main_menu import is_admin
-    uid = message.from_user.id if message.from_user else 0
-    await message.answer("Главное меню:", reply_markup=main_menu_kb(is_admin=is_admin(uid)))
+    # Шаг назад внутри процесса «Заявка по шаблону», а не выход в главное меню.
+    from_user = message.from_user
+    if not from_user:
+        return
+
+    data = await state.get_data()
+    # Если article присутствует — это сценарий "повторный товар".
+    prev_state = "template:article" if data.get("article") else "template:new_gender"
+
+    # Сбрасываем данные уже созданной заявки (если пользователь вернулся назад после оформления).
+    order_keys = [
+        "order_id",
+        "order_number",
+        "order_items_count",
+        "markznak_sent",
+        "author_username",
+        "author_full_name",
+        "author_id",
+        "comment",
+    ]
+    for k in order_keys:
+        data.pop(k, None)
+    await state.update_data(**data)
+    await state.set_state(prev_state)
+
+    if prev_state == "template:article":
+        await message.answer("Введите наименование товара (для запроса шаблона):")
+    else:
+        await message.answer("Введите целевой пол (МУЖСКОЙ / ЖЕНСКИЙ):")
     return
 
 
@@ -481,11 +507,36 @@ async def process_template_file(message: Message, state: FSMContext):
 # --- Доп. файл после создания заявки ---
 @router.message(StateFilter("template:await_extra_file"), F.text == "« Назад")
 async def template_extra_back(message: Message, state: FSMContext):
-    await state.clear()
-    from bot.handlers.main_menu import is_admin as _is_admin
-    uid = message.from_user.id if message.from_user else 0
-    is_adm = await _is_admin(uid)
-    await message.answer("Главное меню:", reply_markup=main_menu_kb(is_admin=is_adm))
+    # Шаг назад: вернуться к загрузке заполненного шаблона.
+    # Заявка уже создана в backend, поэтому удаляем её, чтобы следующий upload не плодил дубликаты.
+    user = message.from_user
+    if not user:
+        return
+
+    data = await state.get_data()
+    order_id = data.get("order_id")
+    author_id = data.get("author_id") or user.id
+
+    if order_id:
+        try:
+            await delete_order(order_id=order_id, requester_telegram_id=author_id)
+        except Exception:
+            pass
+
+    # Удаляем только данные по созданной заявке, а выбор шаблона оставляем.
+    data.update(
+        order_id=None,
+        order_number=None,
+        order_items_count=None,
+        markznak_sent=False,
+        author_username=None,
+        author_full_name=None,
+        author_id=author_id,
+        comment=None,
+    )
+    await state.update_data(**data)
+    await state.set_state("template:await_file")
+    await message.answer("Отправьте заполненный шаблон в формате Excel (.xlsx).")
     return
 
 
@@ -558,6 +609,7 @@ async def template_final_comment_skip(callback: CallbackQuery, state: FSMContext
 async def template_final_comment_set(message: Message, state: FSMContext):
     if message.text == "« Назад":
         # Возврат в этап доп. файлов без завершения заявки
+        await state.update_data(comment=None)
         await state.set_state("template:await_extra_file")
         await message.answer(
             "Вы можете прикрепить дополнительный файл или нажать «Готово».",
