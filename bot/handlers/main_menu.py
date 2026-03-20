@@ -84,6 +84,13 @@ async def cmd_start(message: Message):
 @router.message(F.text == "« Назад")
 async def back_to_main(message: Message, state: FSMContext):
     """Return to main menu from any state."""
+    # Если мы в многошаговом процессе (create_order/template/stats period),
+    # не сбрасываем состояние и не отправляем в главное меню.
+    # Дадим шанс сработать state-specific обработчикам «Назад».
+    current_state = await state.get_state()
+    if current_state is not None:
+        raise SkipHandler()
+
     await state.clear()
     user_id = message.from_user.id if message.from_user else 0
     is_adm = await is_admin(user_id)
