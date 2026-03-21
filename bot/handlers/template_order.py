@@ -192,8 +192,19 @@ async def template_new_product(message: Message, state: FSMContext):
 
 
 # --- Новый товар: юридическое лицо (inline) ---
+@router.message(StateFilter("template:legal_entity"), F.text == "« Назад")
+async def template_legal_entity_back_reply(message: Message, state: FSMContext):
+    """Назад на выбор Повторный/Новый — только reply-кнопка «Назад» (инлайн убран)."""
+    await message.answer(
+        "Выберите способ добавления товара:",
+        reply_markup=product_choice_kb(),
+    )
+    await state.set_state("template:product_choice")
+
+
 @router.callback_query(StateFilter("template:legal_entity"), F.data == "back")
 async def template_legal_entity_back(callback: CallbackQuery, state: FSMContext):
+    """Совместимость: старые сообщения с инлайн «Назад» до обновления."""
     await callback.message.edit_text("Отменено")
     await callback.message.answer("Выберите способ добавления товара:", reply_markup=product_choice_kb())
     await state.set_state("template:product_choice")
@@ -296,6 +307,10 @@ async def template_new_gender(message: Message, state: FSMContext):
     )
     await state.update_data(comment=None)
     await state.set_state("template:await_file")
+    await message.answer(
+        "Отправьте заполненный шаблон в чат или воспользуйтесь кнопками ниже.",
+        reply_markup=attach_file_kb(),
+    )
 
 
 # --- Повторный: ввод артикула/наименования ---
@@ -334,6 +349,10 @@ async def process_article_template(message: Message, state: FSMContext):
     )
     await state.update_data(article=article, ms_number=None, comment=None)
     await state.set_state("template:await_file")
+    await message.answer(
+        "Отправьте заполненный шаблон в чат или воспользуйтесь кнопками ниже.",
+        reply_markup=attach_file_kb(),
+    )
 
 
 # --- Комментарий к заявке (общий для нового/повторного товара по шаблону) ---
@@ -344,7 +363,7 @@ async def template_comment_set(message: Message, state: FSMContext):
     await state.update_data(comment=message.text.strip())
     await message.answer(
         "Комментарий сохранён. Отправьте заполненный шаблон в чат (файл Excel .xlsx).",
-        reply_markup=back_kb(),
+        reply_markup=attach_file_kb(),
     )
     await state.set_state("template:await_file")
 
@@ -377,9 +396,15 @@ async def template_file_back(message: Message, state: FSMContext):
     await state.set_state(prev_state)
 
     if prev_state == "template:article":
-        await message.answer("Введите наименование товара (для запроса шаблона):")
+        await message.answer(
+            "Введите наименование товара (для запроса шаблона):",
+            reply_markup=back_kb(),
+        )
     else:
-        await message.answer("Введите целевой пол (МУЖСКОЙ / ЖЕНСКИЙ):")
+        await message.answer(
+            "Выберите целевой пол:",
+            reply_markup=target_gender_kb(),
+        )
     return
 
 
@@ -396,7 +421,10 @@ async def template_file_skip(message: Message, state: FSMContext):
 @router.message(StateFilter("template:await_file"), F.text == "📎 Прикрепить файл")
 async def template_ask_file(message: Message, state: FSMContext):
     """Пользователь нажал «Прикрепить файл» — просим отправить заполненный шаблон (Excel)."""
-    await message.answer("Отправьте заполненный шаблон в формате Excel (.xlsx).")
+    await message.answer(
+        "Отправьте заполненный шаблон в формате Excel (.xlsx).",
+        reply_markup=attach_file_kb(),
+    )
 
 
 @router.message(StateFilter("template:await_file"), F.document)
@@ -536,7 +564,10 @@ async def template_extra_back(message: Message, state: FSMContext):
     )
     await state.update_data(**data)
     await state.set_state("template:await_file")
-    await message.answer("Отправьте заполненный шаблон в формате Excel (.xlsx).")
+    await message.answer(
+        "Отправьте заполненный шаблон в формате Excel (.xlsx).",
+        reply_markup=attach_file_kb(),
+    )
     return
 
 

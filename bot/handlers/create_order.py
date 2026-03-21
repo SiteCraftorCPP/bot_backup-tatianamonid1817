@@ -24,6 +24,9 @@ from bot.keyboards import (
     skip_inline_kb,
     add_more_kb,
     brands_kb,
+    country_kb,
+    target_gender_kb,
+    attach_file_kb,
 )
 from bot.api_client import (
     create_order_from_template,
@@ -155,8 +158,18 @@ async def process_product_select(callback: CallbackQuery, state: FSMContext):
 
 
 # --- Back from legal entity ---
+@router.message(StateFilter("create_order:legal_entity"), F.text == "« Назад")
+async def back_from_legal_entity_reply(message: Message, state: FSMContext):
+    await message.answer(
+        "Выберите способ добавления товара:",
+        reply_markup=product_choice_kb(),
+    )
+    await state.set_state("create_order:product_choice")
+
+
 @router.callback_query(StateFilter("create_order:legal_entity"), F.data == "back")
 async def back_from_legal_entity(callback: CallbackQuery, state: FSMContext):
+    """Совместимость: старые сообщения с инлайн «Назад»."""
     await callback.message.edit_text("Отменено")
     await callback.message.answer("Выберите способ добавления товара:", reply_markup=product_choice_kb())
     await state.set_state("create_order:product_choice")
@@ -197,8 +210,21 @@ async def process_new_brand(message: Message, state: FSMContext):
 @router.message(StateFilter("create_order:new_country"), F.text)
 async def process_new_country(message: Message, state: FSMContext):
     await state.update_data(country=message.text)
-    await message.answer("Введите целевой пол (МУЖСКОЙ / ЖЕНСКИЙ):")
+    await message.answer(
+        "Выберите целевой пол:",
+        reply_markup=target_gender_kb(),
+    )
     await state.set_state("create_order:new_gender")
+
+
+@router.message(StateFilter("create_order:new_gender"), F.text == "« Назад")
+async def create_order_new_gender_back(message: Message, state: FSMContext):
+    await state.update_data(target_gender=None)
+    await message.answer(
+        "Выберите страну производства:",
+        reply_markup=country_kb(),
+    )
+    await state.set_state("create_order:new_country")
 
 
 @router.message(StateFilter("create_order:new_gender"), F.text)
@@ -223,7 +249,8 @@ async def process_new_gender(message: Message, state: FSMContext):
     )
     await state.set_state("create_order:new_template_file")
     await message.answer(
-        "Отправьте заполненный файл или нажмите «Назад»", reply_markup=back_kb()
+        "Отправьте заполненный файл или нажмите «Назад»",
+        reply_markup=attach_file_kb(),
     )
 
 
@@ -233,7 +260,10 @@ async def new_template_back(message: Message, state: FSMContext):
     # Возвращаемся на шаг выбора пола, чтобы шаблон мог быть перегенерирован.
     await state.update_data(target_gender=None)
     await state.set_state("create_order:new_gender")
-    await message.answer("Введите целевой пол (МУЖСКОЙ / ЖЕНСКИЙ):")
+    await message.answer(
+        "Выберите целевой пол:",
+        reply_markup=target_gender_kb(),
+    )
 
 
 @router.message(StateFilter("create_order:new_template_file"), F.document)

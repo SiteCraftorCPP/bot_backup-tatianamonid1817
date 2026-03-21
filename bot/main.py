@@ -48,11 +48,16 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     except asyncio.CancelledError:
-        logger.info("Бот остановлен.")
-        raise
+        # Нормальная отмена при остановке polling (Ctrl+C / SIGTERM)
+        logger.info("Polling остановлен.")
     finally:
         await bot.session.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Ctrl+C: asyncio уже отменил задачи, не печатаем полный traceback
+        logger.info("Остановка по Ctrl+C.")
+        sys.exit(0)

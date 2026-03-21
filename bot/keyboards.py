@@ -113,7 +113,7 @@ def legal_entity_kb() -> InlineKeyboardMarkup:
     buttons = [
         [InlineKeyboardButton(text=e, callback_data=f"le:{e}")] for e in entities
     ]
-    buttons.append([InlineKeyboardButton(text="« Назад", callback_data="back")])
+    # Назад — только reply-клавиатура с предыдущего шага (product_choice), без дубля инлайн.
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
