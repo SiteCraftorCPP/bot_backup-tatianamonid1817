@@ -16,7 +16,8 @@ from bot.keyboards import (
     back_kb,
     attach_file_kb,
     done_extra_kb,
-    skip_inline_kb,
+    final_comment_kb,
+    final_approval_kb,
     category_kb,
     product_choice_kb,
     legal_entity_kb,
@@ -583,7 +584,7 @@ async def template_extra_done(message: Message, state: FSMContext):
         await state.set_state("template:final_comment")
         await message.answer(
             "Введите комментарий к заявке или нажмите «Пропустить».",
-            reply_markup=skip_inline_kb("tmpl_final_skip_comment"),
+            reply_markup=final_comment_kb(),
         )
         return
 
@@ -631,9 +632,26 @@ async def _finalize_order_with_comment(message: Message, state: FSMContext) -> N
 
 @router.callback_query(StateFilter("template:final_comment"), F.data == "tmpl_final_skip_comment")
 async def template_final_comment_skip(callback: CallbackQuery, state: FSMContext):
+    # Совместимость: обработка старых inline-кнопок "Пропустить".
     await state.update_data(comment=None)
-    await _finalize_order_with_comment(callback.message, state)
+    await state.set_state("template:final_approval")
+    await callback.message.answer(
+        "Комментарий пропущен.\n\n"
+        "Заявка может быть оформлена?",
+        reply_markup=final_approval_kb(),
+    )
     await callback.answer()
+
+
+@router.message(StateFilter("template:final_comment"), F.text == "⏭ Пропустить")
+async def template_final_comment_skip_text(message: Message, state: FSMContext):
+    await state.update_data(comment=None)
+    await state.set_state("template:final_approval")
+    await message.answer(
+        "Комментарий пропущен.\n\n"
+        "Заявка может быть оформлена?",
+        reply_markup=final_approval_kb(),
+    )
 
 
 @router.message(StateFilter("template:final_comment"), F.text)
@@ -649,7 +667,36 @@ async def template_final_comment_set(message: Message, state: FSMContext):
         return
 
     await state.update_data(comment=message.text.strip())
+    await state.set_state("template:final_approval")
+    await message.answer(
+        "Комментарий сохранён.\n\n"
+        "Заявка может быть оформлена?",
+        reply_markup=final_approval_kb(),
+    )
+
+
+@router.message(StateFilter("template:final_approval"), F.text == "« Назад")
+async def template_final_approval_back(message: Message, state: FSMContext):
+    await state.set_state("template:final_comment")
+    await message.answer(
+        "Введите комментарий к заявке или нажмите «Пропустить».",
+        reply_markup=final_comment_kb(),
+    )
+
+
+@router.message(StateFilter("template:final_approval"), F.text.in_(["Да", "✅ Да"]))
+async def template_final_approval_yes(message: Message, state: FSMContext):
     await _finalize_order_with_comment(message, state)
+
+
+@router.message(StateFilter("template:final_approval"), F.text.in_(["Нет", "❌ Нет"]))
+async def template_final_approval_no(message: Message, state: FSMContext):
+    await state.set_state("template:await_extra_file")
+    await message.answer(
+        "Ок, заявку пока не оформляю.\n"
+        "Вы можете прикрепить дополнительный файл или снова нажать «Готово».",
+        reply_markup=done_extra_kb(),
+    )
 
 
 @router.message(StateFilter("template:await_extra_file"), F.document)

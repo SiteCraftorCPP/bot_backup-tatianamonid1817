@@ -72,6 +72,28 @@ def done_extra_kb() -> ReplyKeyboardMarkup:
     )
 
 
+def final_comment_kb() -> ReplyKeyboardMarkup:
+    """Финальный комментарий: пропустить или вернуться назад."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="⏭ Пропустить")],
+            [KeyboardButton(text="« Назад")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def final_approval_kb() -> ReplyKeyboardMarkup:
+    """Подтверждение: можно ли оформлять заявку."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Да"), KeyboardButton(text="Нет")],
+            [KeyboardButton(text="« Назад")],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def category_kb() -> ReplyKeyboardMarkup:
     """Category selection: Одежда / Обувь."""
     return ReplyKeyboardMarkup(
