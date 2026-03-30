@@ -246,9 +246,7 @@ async def cmd_add_admin(message: Message, state: FSMContext) -> None:
         await message.answer(
             "Пользователь сохранён как администратор.\n"
             f"telegram_id: <code>{data.get('telegram_id')}</code>\n"
-            "role: <b>admin</b>\n\n"
-            "Уведомления о заявках приходят всем с ролью admin в БД и всем из <code>ADMIN_IDS</code> в .env "
-            "(добавлять в .env больше не обязательно).",
+            "role: <b>admin</b>",
             parse_mode="HTML",
         )
         return
@@ -314,9 +312,7 @@ async def handle_admin_data(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Пользователь сохранён как администратор.\n"
         f"telegram_id: <code>{data.get('telegram_id')}</code>\n"
-        "role: <b>admin</b>\n\n"
-        "Уведомления о заявках приходят всем с ролью admin в БД и всем из <code>ADMIN_IDS</code> в .env "
-        "(добавлять в .env больше не обязательно).",
+        "role: <b>admin</b>",
         parse_mode="HTML",
     )
     await state.clear()
