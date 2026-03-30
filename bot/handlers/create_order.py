@@ -35,6 +35,7 @@ from bot.api_client import (
     get_new_template_excel,
     get_markznak_order_excel,
     get_brands,
+    admin_telegram_ids_for_notify,
 )
 from config import get_settings
 from bot.notification_registry import notifications_registry
@@ -360,7 +361,7 @@ async def process_new_template_file(message: Message, state: FSMContext):
             f.write(excel_bytes)
             tmp_path = f.name
         try:
-            admin_ids = settings.admin_ids_list
+            admin_ids = await admin_telegram_ids_for_notify()
             doc_out = FSInputFile(
                 tmp_path, filename=f"Заявка_{order['number']}_markznak.xlsx"
             )
@@ -587,7 +588,7 @@ async def process_confirm(message: Message, state: FSMContext):
             f.write(excel_bytes)
             tmp_path = f.name
         try:
-            admin_ids = settings.admin_ids_list
+            admin_ids = await admin_telegram_ids_for_notify()
             doc = FSInputFile(tmp_path, filename=f"Заявка_{order['number']}.xlsx")
             caption_lines = [
                 f"Новая заявка №{order['number'].split('-')[-1]}",

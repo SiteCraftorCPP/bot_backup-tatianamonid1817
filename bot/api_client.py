@@ -1,6 +1,9 @@
 """HTTP client for Backend API."""
+import logging
 import httpx
 from config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 async def search_products(q: str, limit: int = 20) -> list[dict]:
@@ -249,6 +252,28 @@ async def list_admins() -> list[dict]:
         if not isinstance(data, list):
             return []
         return data
+
+
+async def admin_telegram_ids_for_notify() -> list[int]:
+    """Кому слать админ-уведомления: ADMIN_IDS из .env + все role=admin из БД.
+
+    /add_admin добавляет только в БД, без правки .env — без этого merge новый админ
+    не получал бы личные уведомления о заявках.
+    """
+    settings = get_settings()
+    ids: set[int] = set(settings.admin_ids_list)
+    try:
+        for row in await list_admins():
+            tid = row.get("telegram_id")
+            if tid is None:
+                continue
+            try:
+                ids.add(int(tid))
+            except (TypeError, ValueError):
+                continue
+    except Exception as e:  # noqa: BLE001
+        logger.warning("list_admins failed, using ADMIN_IDS only: %s", e)
+    return sorted(ids)
 
 
 async def delete_user(telegram_id: int) -> bool:

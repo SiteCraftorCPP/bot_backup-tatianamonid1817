@@ -15,6 +15,7 @@ from bot.api_client import (
     get_user,
     delete_order as api_delete_order,
     delete_order_admin as api_delete_order_admin,
+    admin_telegram_ids_for_notify,
 )
 from bot.keyboards import main_menu_kb, orders_list_inline, order_detail_back_kb
 from bot.notification_registry import notifications_registry
@@ -836,7 +837,6 @@ async def delete_order_yes(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(f"Заявка №{number} успешно удалена.")
 
     # Уведомляем админов.
-    settings = get_settings()
     username = callback.from_user.username or resp.get("author_username") or ""
     user_label = f"@{username}" if username else str(callback.from_user.id)
     from datetime import datetime
@@ -847,7 +847,7 @@ async def delete_order_yes(callback: CallbackQuery, state: FSMContext):
         f"Пользователь: {user_label}\n"
         f"Дата удаления: {now}"
     )
-    for admin_id in settings.admin_ids_list:
+    for admin_id in await admin_telegram_ids_for_notify():
         try:
             await callback.bot.send_message(chat_id=admin_id, text=text)
         except Exception:

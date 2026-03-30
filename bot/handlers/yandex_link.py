@@ -6,7 +6,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 
-from bot.api_client import get_orders, get_order, update_order
+from bot.api_client import get_orders, get_order, update_order, admin_telegram_ids_for_notify
 from bot.keyboards import main_menu_kb, orders_list_inline
 from config import get_settings
 
@@ -176,7 +176,7 @@ async def ylink_enter_url(message: Message, state: FSMContext):
         f"Ссылка: {url}\n\n"
         f"{status_phrase}"
     )
-    for admin_id in settings.admin_ids_list:
+    for admin_id in await admin_telegram_ids_for_notify():
         try:
             await message.bot.send_message(chat_id=admin_id, text=admin_text)
         except Exception as e:

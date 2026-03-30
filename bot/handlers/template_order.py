@@ -34,9 +34,9 @@ from bot.api_client import (
     get_brands,
     get_user,
     upsert_user,
+    admin_telegram_ids_for_notify,
 )
 from bot.notification_registry import notifications_registry
-from config import get_settings
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -54,8 +54,7 @@ async def _send_markznak_to_admins(
     author_id: int | None = None,
 ) -> None:
     """Сформировать файл МаркЗнак по заявке и отправить всем администраторам."""
-    settings = get_settings()
-    admin_ids = settings.admin_ids_list
+    admin_ids = await admin_telegram_ids_for_notify()
     try:
         from aiogram.types import FSInputFile
         import tempfile
@@ -722,8 +721,7 @@ async def process_extra_file(message: Message, state: FSMContext):
         f"Файл: {doc.file_name or 'файл'}"
     )
     user_doc = BufferedInputFile(file_bytes, filename=doc.file_name or "файл")
-    settings = get_settings()
-    for admin_id in settings.admin_ids_list:
+    for admin_id in await admin_telegram_ids_for_notify():
         try:
             await message.bot.send_document(
                 chat_id=admin_id,
