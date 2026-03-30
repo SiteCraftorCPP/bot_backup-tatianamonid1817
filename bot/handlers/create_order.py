@@ -611,11 +611,18 @@ async def process_confirm(message: Message, state: FSMContext):
             )
             for admin_id in admin_ids:
                 try:
-                    await message.bot.send_document(
+                    sent = await message.bot.send_document(
                         chat_id=admin_id,
                         document=doc,
                         caption=caption,
                         reply_markup=markup,
+                    )
+                    notifications_registry.add(
+                        order_id=order["id"],
+                        chat_id=sent.chat.id,
+                        message_id=sent.message_id,
+                        is_document=True,
+                        file_id=sent.document.file_id if sent.document else None,
                     )
                 except Exception as e:
                     logger.exception("Send to admin %s failed: %s", admin_id, e)

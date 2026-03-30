@@ -49,6 +49,11 @@ class NotificationRegistry:
     def get_for_order(self, order_id: int) -> List[NotificationEntry]:
         return list(self._by_order.get(order_id, []))
 
+    def pop_order(self, order_id: int) -> List[NotificationEntry]:
+        """Забрать и удалить из реестра все уведомления по заявке (после взятия в работу)."""
+        entries = self._by_order.pop(order_id, [])
+        return list(entries)
+
 
 # Глобальный инстанс сервиса-реестра
 notifications_registry = NotificationRegistry()

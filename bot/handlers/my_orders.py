@@ -1192,6 +1192,20 @@ async def take_order_in_work(callback: CallbackQuery, state: FSMContext):
             if responsible_username
             else (str(responsible_id) if responsible_id else "администратор")
         )
+        note = f"\n\nУже в работе. Ответственный: {resp_label}"
+        try:
+            if callback.message and callback.message.caption is not None:
+                await callback.message.edit_caption(
+                    caption=callback.message.caption + note,
+                    reply_markup=None,
+                )
+            elif callback.message and callback.message.text is not None:
+                await callback.message.edit_text(
+                    callback.message.text + note,
+                    reply_markup=None,
+                )
+        except Exception:
+            pass
         await callback.answer(
             f"Эта заявка уже в работе у {resp_label}.", show_alert=True
         )
@@ -1237,13 +1251,13 @@ async def take_order_in_work(callback: CallbackQuery, state: FSMContext):
         await callback.message.reply("Заявка не найдена или не обновлена.")
         return
 
-    # Удаляем сообщения с заявкой у всех остальных админов, которым отправляли уведомление
+    # Удаляем сообщения с заявкой у всех остальных админов (реестр снимаем сразу, чтобы не копить мусор)
     taken_by = (
         f"Взял в работу: @{callback.from_user.username}"
         if callback.from_user.username
         else "Заявка взята в работу."
     )
-    notifications = notifications_registry.get_for_order(order_id)
+    notifications = notifications_registry.pop_order(order_id)
     for entry in notifications:
         try:
             # Сообщение, из которого пришёл callback, не трогаем здесь
@@ -1253,7 +1267,7 @@ async def take_order_in_work(callback: CallbackQuery, state: FSMContext):
                 and callback.message.chat.id == entry.chat_id
             ):
                 continue
-            # Остальным админам просто удаляем сообщение с заявкой
+            # Остальным админам удаляем уведомление целиком
             await callback.bot.delete_message(
                 chat_id=entry.chat_id,
                 message_id=entry.message_id,
