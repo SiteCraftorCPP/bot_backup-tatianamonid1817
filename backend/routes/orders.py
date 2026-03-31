@@ -2,7 +2,7 @@
 from datetime import datetime
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -250,24 +250,60 @@ async def create_order_from_template(
         )
     items: list[OrderItemCreate] = []
     for r in rows:
-        # Поиск существующего товара стараемся делать по наименованию и размеру,
-        # чтобы избежать ложных совпадений по "общим" артикулам (например, "ДЖЕМПЕР").
-        stmt = select(Product).where(
-            Product.name == r.get("name"),
-            Product.size == r["size"],
-        )
-        result = await db.execute(stmt)
-        product = result.scalars().first()
+        # Важно: для повторных шаблонов один и тот же article+size может существовать
+        # у разных юрлиц/брендов. Ищем максимально строго, иначе легко "склеить"
+        # позицию с чужим product_id и получить неверные поля в МаркЗнак.
+        product = None
 
-        # Если по имени не нашли, пробуем старый вариант: по article+size
-        # как запасной механизм для уже заведённых данных.
+        strict_filters = [Product.size == r["size"]]
+        if r.get("name"):
+            strict_filters.append(Product.name == r.get("name"))
+        if r.get("article"):
+            strict_filters.append(Product.article == r["article"])
+        if r.get("legal_entity"):
+            legal_entity_val = str(r["legal_entity"]).strip()
+            strict_filters.append(
+                or_(
+                    Product.legal_entity == legal_entity_val,
+                    func.lower(Product.legal_entity) == legal_entity_val.lower(),
+                )
+            )
+        if r.get("brand"):
+            brand_val = str(r["brand"]).strip()
+            strict_filters.append(
+                or_(
+                    Product.brand == brand_val,
+                    func.lower(Product.brand) == brand_val.lower(),
+                )
+            )
+
+        stmt = select(Product).where(*strict_filters)
+        result = await db.execute(stmt)
+        strict_candidates = result.scalars().all()
+        if len(strict_candidates) == 1:
+            product = strict_candidates[0]
+
+        # Мягкий fallback только если строгий поиск ничего не дал:
+        # 1) name+size; 2) article+size.
+        # В обоих случаях берём product_id ТОЛЬКО при уникальном совпадении.
+        if not product and r.get("name"):
+            stmt = select(Product).where(
+                Product.name == r.get("name"),
+                Product.size == r["size"],
+            )
+            result = await db.execute(stmt)
+            candidates = result.scalars().all()
+            if len(candidates) == 1:
+                product = candidates[0]
         if not product:
             stmt = select(Product).where(
                 Product.article == r["article"],
                 Product.size == r["size"],
             )
             result = await db.execute(stmt)
-            product = result.scalars().first()
+            candidates = result.scalars().all()
+            if len(candidates) == 1:
+                product = candidates[0]
 
         if product:
             items.append(

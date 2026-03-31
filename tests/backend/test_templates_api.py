@@ -129,3 +129,93 @@ async def test_create_order_from_template_happy_path(client: AsyncClient, test_d
     assert len(order["items"]) == 2
     quantities = sorted(i["quantity"] for i in order["items"])
     assert quantities == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_create_order_from_template_respects_brand_and_legal_entity(
+    client: AsyncClient,
+    test_db_session: AsyncSession,
+):
+    """Не смешивать дубли article+size с разными брендом/ЮЛ."""
+    p_line17 = Product(
+        article="2705black",
+        size="30",
+        name="Брюки женские, арт. 2705black, размер 30",
+        brand="Line 17",
+        color="Черный",
+        tnved_code="6203429000",
+        composition="97% хлопок, 3% эластан",
+        country="Россия",
+        target_gender="ЖЕНСКИЙ",
+        category="Брюки",
+        legal_entity="Малец",
+    )
+    p_flowlab = Product(
+        article="2705black",
+        size="30",
+        name="Брюки женские, арт. 2705black, размер 30",
+        brand="Flow Lab",
+        color="Черный",
+        tnved_code="6203429000",
+        composition="97% хлопок, 3% эластан",
+        country="Россия",
+        target_gender="ЖЕНСКИЙ",
+        category="Брюки",
+        legal_entity="Чайковский",
+    )
+    test_db_session.add_all([p_line17, p_flowlab])
+    await test_db_session.commit()
+    await test_db_session.refresh(p_line17)
+    await test_db_session.refresh(p_flowlab)
+
+    resp = await client.get("/products/template", params={"article": "2705black"})
+    assert resp.status_code == 200
+
+    wb = load_workbook(io.BytesIO(resp.content))
+    ws = wb.active
+
+    # Находим строку именно для Flow Lab + Чайковский и задаём количество.
+    target_row = None
+    for row in range(2, ws.max_row + 1):
+        article = ws.cell(row=row, column=2).value
+        size = ws.cell(row=row, column=3).value
+        brand = ws.cell(row=row, column=5).value
+        legal_entity = ws.cell(row=row, column=13).value
+        if (
+            str(article or "").strip() == "2705black"
+            and str(size or "").strip() == "30"
+            and str(brand or "").strip().lower() == "flow lab"
+            and str(legal_entity or "").strip().lower() == "чайковский"
+        ):
+            target_row = row
+            break
+
+    assert target_row is not None, "В шаблоне не найдена строка Flow Lab + Чайковский"
+    ws.cell(row=target_row, column=1, value=1)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    files = {
+        "file": (
+            "template_2705.xlsx",
+            buf.getvalue(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    }
+    data = {
+        "author_telegram_id": "777",
+        "author_username": "tester_critical",
+        "author_full_name": "Tester Critical",
+    }
+
+    resp2 = await client.post("/orders/from_template", data=data, files=files)
+    assert resp2.status_code == 200
+    order = resp2.json()
+    assert len(order["items"]) == 1
+
+    item = order["items"][0]
+    assert item["product_id"] == p_flowlab.id
+    assert item["brand"] == "Flow Lab"
+    assert item["legal_entity"] == "Чайковский"
