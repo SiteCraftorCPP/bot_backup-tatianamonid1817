@@ -1,8 +1,14 @@
 """My orders handler."""
+import html
 import logging
-from aiogram import Router, F
+import os
+import re
+import tempfile
+from aiogram import Router, F, Dispatcher
+from aiogram.enums import ParseMode
 from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 
 from config import get_settings
 from bot.api_client import (
@@ -16,15 +22,248 @@ from bot.api_client import (
     delete_order as api_delete_order,
     delete_order_admin as api_delete_order_admin,
     admin_telegram_ids_for_notify,
+    list_order_telegram_postings,
+    clear_order_telegram_postings,
+    register_order_telegram_posting,
 )
 from bot.keyboards import main_menu_kb, orders_list_inline, order_detail_back_kb
 from bot.notification_registry import notifications_registry
 from bot.handlers.main_menu import is_admin
+from backend.services.excel_service import (
+    get_markznak_download_filename,
+    get_order_excel_download_filename,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 ORDERS_PER_PAGE = 16
+
+
+async def _purge_admin_order_telegram_cards(
+    bot,
+    order_id: int,
+    *,
+    skip_chat_id: int | None = None,
+    skip_message_id: int | None = None,
+) -> None:
+    """Удалить у админов сообщения с МаркЗнак: записи в БД + in-memory реестр."""
+    try:
+        db_rows = await list_order_telegram_postings(order_id)
+    except Exception as e:
+        logger.warning("list_order_telegram_postings(%s) failed: %s", order_id, e)
+        db_rows = []
+    mem_entries = notifications_registry.pop_order(order_id)
+    seen: set[tuple[int, int]] = set()
+
+    async def _try_delete(cid: int, mid: int) -> None:
+        key = (cid, mid)
+        if key in seen:
+            return
+        seen.add(key)
+        if skip_chat_id is not None and skip_message_id is not None:
+            if cid == skip_chat_id and mid == skip_message_id:
+                return
+        try:
+            await bot.delete_message(chat_id=cid, message_id=mid)
+        except Exception:
+            pass
+
+    for row in db_rows:
+        await _try_delete(int(row["chat_id"]), int(row["message_id"]))
+    for entry in mem_entries:
+        await _try_delete(int(entry.chat_id), int(entry.message_id))
+
+    try:
+        await clear_order_telegram_postings(order_id)
+    except Exception as e:
+        logger.warning("clear_order_telegram_postings(%s) failed: %s", order_id, e)
+
+
+async def _show_my_orders_list_for_user(
+    bot,
+    state: FSMContext,
+    *,
+    user_id: int,
+    chat_id: int,
+    header_notice: str | None = None,
+) -> None:
+    """Тот же список, что по «📦 Мои заявки», опционально с предупреждением сверху."""
+    await state.clear()
+    is_adm = await is_admin(user_id)
+    try:
+        if is_adm:
+            in_work = await get_orders(
+                responsible_telegram_id=user_id, status="в работе", limit=100
+            )
+            ready = await get_orders(
+                responsible_telegram_id=user_id, status="готово", limit=100
+            )
+            seen: set[int] = set()
+            orders: list[dict] = []
+            for o in in_work + ready:
+                oid = int(o.get("id"))
+                if oid in seen:
+                    continue
+                seen.add(oid)
+                orders.append(o)
+        else:
+            orders = await get_orders(author_telegram_id=user_id, limit=100)
+    except Exception as e:
+        logger.exception("Get orders for list after notice failed: %s", e)
+        tail = "Ошибка загрузки заявок. Попробуйте «📦 Мои заявки»."
+        text = f"{header_notice.strip()}\n\n{tail}" if header_notice else tail
+        await bot.send_message(chat_id=chat_id, text=text)
+        return
+
+    filter_mode = "my_admin" if is_adm else "my_user"
+    notice_block = (header_notice.strip() + "\n\n") if header_notice else ""
+
+    if not orders:
+        empty = "У вас пока нет заявок в работе." if is_adm else "У вас пока нет заявок."
+        await bot.send_message(chat_id=chat_id, text=f"{notice_block}{empty}")
+        return
+
+    if is_adm:
+        items = [(o["id"], o["number"], o["status"]) for o in orders]
+        title_base = "Ваши заявки (в работе и выполненные):\n\nВыберите заявку:"
+    else:
+        items = [
+            (o["id"], o["number"], _user_visible_status(o["status"])) for o in orders
+        ]
+        title_base = "Ваши заявки:\n\nВыберите заявку для просмотра:"
+
+    has_next = len(orders) > ORDERS_PER_PAGE
+    title = f"{notice_block}{title_base}"
+    await bot.send_message(
+        chat_id=chat_id,
+        text=title,
+        reply_markup=orders_list_inline(
+            items,
+            page=0,
+            has_next=has_next,
+            prefix="ord",
+            show_filters=True,
+            current_filter=None,
+            filter_mode=filter_mode,
+        ),
+    )
+    await state.update_data(
+        orders=orders,
+        page=0,
+        mode="my",
+        status_filter=None,
+        is_admin_in_my=is_adm,
+    )
+
+
+def _fmt_order_dt(val) -> str:
+    if val is None:
+        return "—"
+    s = val if isinstance(val, str) else val.isoformat()
+    return s[:19].replace("T", " ")
+
+
+def _order_codes_total(order: dict) -> int:
+    return sum(int(i.get("quantity") or 0) for i in (order.get("items") or []))
+
+
+def _author_display(order: dict) -> str:
+    fn = (order.get("author_full_name") or "").strip()
+    un = order.get("author_username")
+    tid = order.get("author_telegram_id")
+    if fn:
+        return html.escape(fn)
+    if un:
+        return html.escape(f"@{un}")
+    return html.escape(str(tid or "—"))
+
+
+def _format_order_compact_html(
+    order: dict,
+    *,
+    adm: bool,
+    user_to_index: dict | None,
+) -> str:
+    shown_status = order["status"]
+    if not adm:
+        shown_status = _user_visible_status(shown_status)
+    lines = [
+        f"<b>Заявка № {html.escape(str(order.get('number') or ''))}</b>",
+        f"Статус: {html.escape(str(shown_status))}",
+    ]
+    if order.get("deleted_at"):
+        lines.append("<i>В корзине (удалена)</i>")
+    resp = order.get("responsible_username")
+    resp_id = order.get("responsible_telegram_id")
+    if resp or resp_id:
+        if adm and user_to_index is not None:
+            from bot.handlers.history import _admin_color_label as _history_color_label
+
+            lines.append(
+                f"Ответственный: {_history_color_label(resp_id, resp, user_to_index)}"
+            )
+        else:
+            label = f"@{resp}" if resp else str(resp_id or "")
+            lines.append(f"Ответственный: {html.escape(label)}")
+    else:
+        lines.append("Ответственный: не назначен")
+    return "\n".join(lines)
+
+
+def _format_order_details_html(order: dict) -> str:
+    created = _fmt_order_dt(order.get("created_at"))
+    codes = _order_codes_total(order)
+    author = _author_display(order)
+    parts = [
+        "<b>Подробности</b>",
+        f"Дата создания: {html.escape(created)}",
+        f"Количество наклеек: {codes}",
+    ]
+    if order.get("deleted_at"):
+        parts.append("<b>Заявка в корзине</b> (мягкое удаление)")
+    raw_status = (order.get("status") or "").strip()
+    if raw_status == "отправлена":
+        ut = order.get("updated_at")
+        if ut is not None and str(ut).strip():
+            sent_line = _fmt_order_dt(ut)
+            if sent_line and sent_line != "—":
+                parts.append(f"Дата отправки: {html.escape(sent_line)}")
+    parts.append(f"Создал: {author}")
+    resp = order.get("responsible_username")
+    resp_id = order.get("responsible_telegram_id")
+    if resp or resp_id:
+        rlabel = f"@{resp}" if resp else str(resp_id or "")
+        parts.append(f"Ответственный: {html.escape(rlabel)}")
+    else:
+        parts.append("Ответственный: не назначен")
+    link = order.get("yandex_link")
+    if link:
+        parts.append(f"Ссылка на файлы: {html.escape(str(link))}")
+    extras = order.get("extra_attachments") or []
+    if extras:
+        parts.append("")
+        parts.append("<b>Дополнительные файлы:</b>")
+        for i, att in enumerate(extras, 1):
+            fn = att.get("file_name") or "файл"
+            parts.append(f"{i}. {html.escape(str(fn))}")
+    return "\n".join(parts)
+
+
+# Подпись к документу в Telegram — не длиннее 1024 символов.
+_TG_DOCUMENT_CAPTION_MAX = 1024
+
+
+def _telegram_document_caption(details_html: str) -> tuple[str, ParseMode | None]:
+    """Возвращает (caption, parse_mode). При переполнении — подпись без HTML, чтобы не резать теги."""
+    if len(details_html) <= _TG_DOCUMENT_CAPTION_MAX:
+        return details_html, ParseMode.HTML
+    plain = re.sub(r"<[^>]+>", " ", details_html)
+    plain = html.unescape(plain)
+    plain = " ".join(plain.split())
+    if len(plain) <= _TG_DOCUMENT_CAPTION_MAX:
+        return plain, None
+    return plain[: _TG_DOCUMENT_CAPTION_MAX - 1] + "…", None
 
 
 async def _safe_edit_card(
@@ -47,11 +286,21 @@ async def _safe_edit_card(
         await msg.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 
+async def _load_admin_color_index() -> dict:
+    from bot.handlers.history import _load_admins_tuples, _build_user_color_mapping
+
+    admins_tuples = await _load_admins_tuples()
+    full_orders = await get_orders(admin=True, include_deleted=True, limit=100)
+    user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
+    return user_to_index
+
+
 async def _render_order_card(
     callback: CallbackQuery,
     state: FSMContext,
     *,
     order_id: int,
+    show_more_button: bool = True,
 ) -> None:
     """Перерисовать карточку заявки (работает и для text, и для caption)."""
     try:
@@ -64,92 +313,21 @@ async def _render_order_card(
         await callback.answer("Заявка не найдена.", show_alert=True)
         return
 
-    data = await state.get_data()
-    mode = data.get("mode", "my")
-    _ = mode  # mode используется ниже для файла, но здесь не нужен
-
-    date_str = order["created_at"][:19].replace("T", " ")
     adm = await is_admin(callback.from_user.id) if callback.from_user else False
-    shown_status = order["status"]
-    if not adm:
-        shown_status = _user_visible_status(shown_status)
-
-    lines = [
-        f"<b>Заявка №{order['number']}</b>",
-        f"Статус: {shown_status}",
-    ]
-
-    if adm:
-        link = _get_order_file_link(order.get("id") or order_id)
-        if link:
-            lines.append(f'Дата: <a href="{link}">{date_str}</a>')
-        else:
-            lines.append(f"Дата: {date_str}")
-    else:
-        lines.append(f"Дата: {date_str}")
-
-    if adm:
-        resp = order.get("responsible_username")
-        resp_id = order.get("responsible_telegram_id")
-        if resp or resp_id:
-            from bot.handlers.history import (
-                _load_admins_tuples,
-                _build_user_color_mapping,
-                _admin_color_label as _history_color_label,
-            )
-            admins_tuples = await _load_admins_tuples()
-            full_orders = await get_orders(admin=True, limit=100)
-            user_to_index, _admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
-            lines.append(f"Ответственный: {_history_color_label(resp_id, resp, user_to_index)}")
-
-    lines.extend(["", "Позиции:"])
-    for i, item in enumerate(order.get("items", []), 1):
-        name = item.get("name") or item.get("article") or "?"
-        lines.append(f"  {i}. {name} — размер {item.get('size', '?')} x{item.get('quantity', 0)}")
-
-    if order.get("yandex_link"):
-        lines.append("")
-        lines.append(f"Ссылка на файлы: {order['yandex_link']}")
+    user_to_index = await _load_admin_color_index() if adm else None
 
     show_status_btns = adm
-    can_user_delete = (not adm) and (order.get("status") == "создана")
-    text = "\n".join(lines)
+    text = _format_order_compact_html(order, adm=adm, user_to_index=user_to_index)
     markup = order_detail_back_kb(
         is_admin=show_status_btns,
         order_id=order_id,
         current_status=order.get("status"),
-        can_user_delete=can_user_delete,
+        show_more_button=show_more_button,
+        in_trash=bool(order.get("deleted_at")),
     )
     await _safe_edit_card(callback, text, markup, parse_mode="HTML")
     await state.update_data(selected_order_id=order_id)
     await callback.answer()
-
-
-def _build_message_link(chat_id: int, message_id: int) -> str | None:
-    """
-    Построить ссылку на сообщение в чате Telegram.
-
-    Работает для супергрупп/каналов (chat_id < 0). Для приватных чатов
-    публичной ссылки нет — возвращаем None.
-    """
-    if chat_id > 0:
-        return None
-    chat_id_abs = abs(chat_id)
-    # Для супергрупп/каналов внешний id = internal_id - 1000000000000.
-    if chat_id_abs > 10**12:
-        internal = chat_id_abs - 10**12
-    else:
-        internal = chat_id_abs
-    return f"https://t.me/c/{internal}/{message_id}"
-
-
-def _get_order_file_link(order_id: int) -> str | None:
-    """Получить ссылку на сообщение с файлом заявки, если оно было отправлено админам."""
-    entries = notifications_registry.get_for_order(order_id)
-    if not entries:
-        return None
-    entry = entries[0]
-    return _build_message_link(entry.chat_id, entry.message_id)
 
 
 COLORS = ["🟢", "🟠", "🔵", "🟣", "🟡", "🟤"]
@@ -188,113 +366,96 @@ def _user_visible_status(status: str) -> str:
 @router.message(F.text == "📦 Мои заявки")
 async def my_orders(message: Message, state: FSMContext):
     """Список заявок: для пользователя — созданные им; для админа — где он ответственный."""
-    await state.clear()
     if not message.from_user:
         return
-    uid = message.from_user.id
-    is_adm = await is_admin(uid)
-    try:
-        if is_adm:
-            # Для админа в «Мои заявки» показываем только свои заявки
-            # в статусах «в работе» и «готово».
-            in_work = await get_orders(
-                responsible_telegram_id=uid, status="в работе", limit=100
-            )
-            ready = await get_orders(
-                responsible_telegram_id=uid, status="готово", limit=100
-            )
-            # Убираем дубли по id
-            seen: set[int] = set()
-            orders: list[dict] = []
-            for o in in_work + ready:
-                oid = int(o.get("id"))
-                if oid in seen:
-                    continue
-                seen.add(oid)
-                orders.append(o)
-        else:
-            # Пользователь видит только свои заявки (author_telegram_id)
-            orders = await get_orders(author_telegram_id=uid, limit=100)
-    except Exception as e:
-        logger.exception("Get orders failed: %s", e)
-        await message.answer("Ошибка загрузки заявок. Попробуйте позже.")
-        return
-    if not orders:
-        if is_adm:
-            await message.answer("У вас пока нет заявок в работе.")
-        else:
-            await message.answer("У вас пока нет заявок.")
-        return
-    filter_mode = "my_admin" if is_adm else "my_user"
-    if is_adm:
-        items = [(o["id"], o["number"], o["status"]) for o in orders]
-    else:
-        # Пользователю показываем «создана / в работе / готова» по маппингу.
-        items = [
-            (o["id"], o["number"], _user_visible_status(o["status"])) for o in orders
-        ]
-    has_next = len(orders) > ORDERS_PER_PAGE
-    title = "Ваши заявки (в работе и выполненные):\n\nВыберите заявку:" if is_adm else "Ваши заявки:\n\nВыберите заявку для просмотра:"
-    await message.answer(
-        title,
-        reply_markup=orders_list_inline(
-            items,
-            page=0,
-            has_next=has_next,
-            prefix="ord",
-            show_filters=True,
-            current_filter=None,
-            filter_mode=filter_mode,
-        ),
+    await _show_my_orders_list_for_user(
+        message.bot,
+        state,
+        user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        header_notice=None,
     )
-    await state.update_data(orders=orders, page=0, mode="my", status_filter=None, is_admin_in_my=is_adm)
 
 
 @router.callback_query(F.data.startswith("ord:"))
 async def order_select(callback: CallbackQuery, state: FSMContext):
-    """Show order details."""
+    """Показать краткую карточку заявки (файл — только по кнопке «Подробнее»)."""
     order_id = int(callback.data.split(":")[1])
     await _render_order_card(callback, state, order_id=order_id)
 
-    # Режим и права для выбора файла
-    data = await state.get_data()
-    mode = data.get("mode", "my")
-    adm = await is_admin(callback.from_user.id) if callback.from_user else False
 
-    # Нужен номер заявки для имени файла/подписи
+@router.callback_query(F.data.startswith("ordmore:"))
+async def order_more_details(callback: CallbackQuery, state: FSMContext):
+    """Детали в подписи к одному Excel: админ — расширенный МаркЗнак (GTIN и др.), автор — краткий."""
+    if not callback.from_user or not callback.message:
+        await callback.answer("Ошибка.", show_alert=True)
+        return
     try:
-        order = await get_order(order_id)
-    except Exception:
-        order = None
-    if not order:
+        order_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка данных.", show_alert=True)
         return
 
-    # Для администратора:
-    # - в истории заявок шлём админский файл МаркЗнак;
-    # - в «моих заявках» шлём пользовательский файл заявки.
     try:
-        import tempfile
-        import os
+        order = await get_order(order_id)
+    except Exception as e:
+        logger.exception("Get order (ordmore) failed: %s", e)
+        await callback.answer("Ошибка загрузки заявки.", show_alert=True)
+        return
+    if not order:
+        await callback.answer("Заявка не найдена.", show_alert=True)
+        return
 
-        if adm and mode == "history":
+    adm = await is_admin(callback.from_user.id)
+    if not adm:
+        if order.get("author_telegram_id") != callback.from_user.id:
+            await callback.answer("Доступ запрещён.", show_alert=True)
+            return
+
+    await callback.answer()
+
+    details_html = _format_order_details_html(order)
+    caption, cap_parse_mode = _telegram_document_caption(details_html)
+
+    try:
+        # Админу в «Мои заявки» и в «Истории» — расширенный файл (GTIN, МаркЗнак);
+        # автору-не-админу — краткий Excel по заявке.
+        if adm:
             excel_bytes = await get_markznak_order_excel(order_id)
-            filename = f"Заявка_{order['number']}_markznak.xlsx"
-            caption = f"Файл МаркЗнак по заявке №{order['number']}."
+            filename = get_markznak_download_filename(order["number"])
         else:
             excel_bytes = await get_order_excel(order_id)
-            filename = f"Заявка_{order['number']}.xlsx"
-            caption = f"Файл заявки №{order['number']}."
+            filename = get_order_excel_download_filename(order["number"])
 
         with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
             f.write(excel_bytes)
             tmp_path = f.name
         try:
             doc = FSInputFile(tmp_path, filename=filename)
-            await callback.message.answer_document(document=doc, caption=caption)
+            await callback.message.answer_document(
+                document=doc,
+                caption=caption,
+                parse_mode=cap_parse_mode,
+            )
         finally:
             os.unlink(tmp_path)
     except Exception as e:
-        logger.exception("Send order excel from detail failed: %s", e)
+        logger.exception("Send order excel after ordmore failed: %s", e)
+
+    for att in order.get("extra_attachments") or []:
+        fid = att.get("telegram_file_id")
+        if not fid:
+            continue
+        fn = att.get("file_name") or "файл"
+        cap = f"Доп. файл к заявке № {order['number']}: {fn}"
+        try:
+            await callback.bot.send_document(
+                chat_id=callback.message.chat.id,
+                document=fid,
+                caption=cap,
+            )
+        except Exception as e:
+            logger.exception("Resend extra attachment failed: %s", e)
 
 
 @router.callback_query(F.data == "ord_back")
@@ -345,6 +506,11 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                 _load_admins_tuples,
                 _build_user_color_mapping,
                 _build_admin_filter_buttons,
+                fetch_history_orders_list,
+                fetch_history_full_orders_for_colors,
+                _history_order_row_caption,
+                _history_trash_inline_kw,
+                _pretty_status_key,
             )
 
             status_key = data.get("status_filter") or "all"
@@ -356,17 +522,20 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
             # чтобы не прятать категории под одной кнопкой.
             if selected_admin_id is not None:
                 selected_admin_id = None
-                status = None if status_key == "all" else status_key
-                orders = await get_orders(admin=True, status=status, limit=100)
-                full_orders = await get_orders(admin=True, limit=100)
+                orders = await fetch_history_orders_list(status_key, admin_filter_id=None)
+                full_orders = await fetch_history_full_orders_for_colors()
                 admins_tuples = await _load_admins_tuples()
                 user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
                 admin_buttons = _build_admin_filter_buttons(
                     admins_tuples, user_to_index, selected_admin_id=None
                 )
-                items = [(o["id"], o["number"], o["status"]) for o in orders]
+                items = [
+                    (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+                    for o in orders
+                ]
                 has_next = len(orders) > ORDERS_PER_PAGE
-                title = f"==================================================\nИстория заявок ({'все' if status_key=='all' else status_key}):"
+                title = f"==================================================\nИстория заявок ({_pretty_status_key(status_key)}):"
+                tw = _history_trash_inline_kw(status_key, data)
                 await _safe_edit_card(
                     callback,
                     f"{title}\n\nВыберите заявку для просмотра:",
@@ -380,6 +549,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                         filter_mode="history",
                         admin_labels=admin_buttons,
                         back_callback="hist_back",
+                        **tw,
                     ),
                 )
                 await state.update_data(
@@ -396,16 +566,20 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
             # 2) Потом откатываем фильтр статуса (к "Все") и тоже возвращаем исходный UI.
             if filters_collapsed and status_key != "all":
                 status_key = "all"
-                orders = await get_orders(admin=True, limit=100)
-                full_orders = orders
+                orders = await fetch_history_orders_list("all", admin_filter_id=None)
+                full_orders = await fetch_history_full_orders_for_colors()
                 admins_tuples = await _load_admins_tuples()
                 user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
                 admin_buttons = _build_admin_filter_buttons(
                     admins_tuples, user_to_index, selected_admin_id=None
                 )
-                items = [(o["id"], o["number"], o["status"]) for o in orders]
+                items = [
+                    (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+                    for o in orders
+                ]
                 has_next = len(orders) > ORDERS_PER_PAGE
                 title = "==================================================\nИстория заявок (все):"
+                tw = _history_trash_inline_kw("all", {**data, "trash_selected_ids": []})
                 await _safe_edit_card(
                     callback,
                     f"{title}\n\nВыберите заявку для просмотра:",
@@ -419,6 +593,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                         filter_mode="history",
                         admin_labels=admin_buttons,
                         back_callback="hist_back",
+                        **tw,
                     ),
                 )
                 await state.update_data(
@@ -429,19 +604,25 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                     admin_filter=None,
                     admin_labels=admin_buttons,
                     filters_collapsed=False,
+                    trash_selected_ids=[],
                 )
                 return
 
             # 3) Потом возвращаемся к выбору категорий
             if filters_collapsed:
-                orders = await get_orders(admin=True, limit=100)
+                orders = await fetch_history_orders_list("all", admin_filter_id=None)
                 admins_tuples = await _load_admins_tuples()
-                user_to_index, _ = _build_user_color_mapping(orders, admins_tuples)
+                full_orders = await fetch_history_full_orders_for_colors()
+                user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
                 admin_buttons = _build_admin_filter_buttons(
                     admins_tuples, user_to_index, selected_admin_id=None
                 )
-                items = [(o["id"], o["number"], o["status"]) for o in orders]
+                items = [
+                    (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+                    for o in orders
+                ]
                 has_next = len(orders) > ORDERS_PER_PAGE
+                tw = _history_trash_inline_kw("all", {**data, "trash_selected_ids": []})
                 await _safe_edit_card(
                     callback,
                     "==================================================\nИстория заявок (все):\n\nВыберите заявку для просмотра:",
@@ -455,6 +636,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                         filter_mode="history",
                         admin_labels=admin_buttons,
                         back_callback="hist_back",
+                        **tw,
                     ),
                 )
                 await state.update_data(
@@ -465,6 +647,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                     admin_filter=None,
                     admin_labels=admin_buttons,
                     filters_collapsed=False,
+                    trash_selected_ids=[],
                 )
                 return
 
@@ -530,19 +713,38 @@ async def orders_page(callback: CallbackQuery, state: FSMContext):
     orders = data.get("orders", [])
     mode = data.get("mode", "my")
     status_filter = data.get("status_filter")
+    filters_collapsed = False
+    trash_kw: dict = {}
+    admin_buttons: list = []
 
     if mode == "history":
-        filters_collapsed = bool(data.get("filters_collapsed", False))
-        def _status_with_responsible(o: dict) -> str:
-            resp = o.get("responsible_username") or ""
-            if not resp:
-                resp = ""
-            else:
-                resp = f" — {resp}"
-            return f"{o['status']}{resp}"
+        from bot.handlers.history import (
+            _load_admins_tuples,
+            _build_user_color_mapping,
+            _build_admin_filter_buttons,
+            fetch_history_full_orders_for_colors,
+            _history_order_row_caption,
+            _history_trash_inline_kw,
+        )
 
-        items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
+        filters_collapsed = bool(data.get("filters_collapsed", False))
+        status_key = data.get("status_filter") or "all"
+        selected_admin_id = data.get("admin_filter")
+        admins_tuples = await _load_admins_tuples()
+        full_orders = await fetch_history_full_orders_for_colors()
+        user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
+        admin_buttons = _build_admin_filter_buttons(
+            admins_tuples,
+            user_to_index,
+            selected_admin_id=selected_admin_id,
+            collapse_others_when_selected=True,
+        )
+        items = [
+            (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+            for o in orders
+        ]
         filter_mode = "history"
+        trash_kw = _history_trash_inline_kw(status_key, data)
     else:
         is_admin_in_my = data.get("is_admin_in_my", False)
         if is_admin_in_my:
@@ -557,59 +759,27 @@ async def orders_page(callback: CallbackQuery, state: FSMContext):
             filter_mode = "my_user"
     start = page * ORDERS_PER_PAGE
     has_next = len(orders) > start + ORDERS_PER_PAGE
-    kw = (
-        {
+    kw: dict = {}
+    if mode in ("history", "my"):
+        kw = {
             "show_filters": (mode != "history") or (not filters_collapsed),
             "current_filter": status_filter,
             "filter_mode": filter_mode,
         }
-        if mode in ("history", "my")
-        else {}
-    )
     if mode == "history" and filters_collapsed:
         kw["filters_back_callback"] = "fltmenu"
         kw["back_callback"] = "hist_back"
+        kw["admin_labels"] = admin_buttons
+        kw.update(trash_kw)
+    elif mode == "history":
+        kw["admin_labels"] = admin_buttons
+        kw["back_callback"] = "hist_back"
+        kw.update(trash_kw)
     await callback.message.edit_reply_markup(
         reply_markup=orders_list_inline(items, page=page, has_next=has_next, prefix="ord", **kw),
     )
     await state.update_data(page=page)
     await callback.answer()
-
-
-def _format_order_message(order: dict, user_to_index: dict | None = None) -> str:
-    """Format order details for display. Если передан user_to_index — ответственный с цветным кружком (как в истории)."""
-    date_str = order["created_at"][:19].replace("T", " ")
-    lines = [
-        f"<b>Заявка №{order['number']}</b>",
-        f"Статус: {order['status']}",
-    ]
-    link = _get_order_file_link(order.get("id"))
-    if link:
-        lines.append(f'Дата: <a href="{link}">{date_str}</a>')
-    else:
-        lines.append(f"Дата: {date_str}")
-    resp = order.get("responsible_username")
-    resp_id = order.get("responsible_telegram_id")
-    if resp or resp_id:
-        if user_to_index is not None:
-            from bot.handlers.history import _admin_color_label as _history_color_label
-            label = _history_color_label(resp_id, resp, user_to_index)
-        else:
-            label = f"@{resp}" if resp else str(resp_id or "")
-        lines.append(f"Ответственный: {label}")
-    lines.extend(
-        [
-            "",
-            "Позиции:",
-        ]
-    )
-    for i, item in enumerate(order.get("items", []), 1):
-        name = item.get("name") or item.get("article") or "?"
-        lines.append(f"  {i}. {name} — размер {item.get('size', '?')} x{item.get('quantity', 0)}")
-    if order.get("yandex_link"):
-        lines.append("")
-        lines.append(f"Ссылка на файлы: {order['yandex_link']}")
-    return "\n".join(lines)
 
 
 @router.callback_query(F.data.startswith("st:"))
@@ -678,7 +848,7 @@ async def change_order_status(callback: CallbackQuery, state: FSMContext):
 
     from bot.handlers.history import _load_admins_tuples, _build_user_color_mapping
     admins_tuples = await _load_admins_tuples()
-    full_orders = await get_orders(admin=True, limit=100)
+    full_orders = await get_orders(admin=True, include_deleted=True, limit=100)
     user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
 
     # Уведомление автору при смене статуса
@@ -688,7 +858,7 @@ async def change_order_status(callback: CallbackQuery, state: FSMContext):
         # Здесь для пользователя шлём только при финальном статусе "отправлена",
         # при этом текст говорит, что заявка готова.
         if author_id and status == "отправлена":
-            text_parts = [f"Ваша заявка №{order['number']} готова."]
+            text_parts = [f"Ваша заявка № {order['number']} готова."]
             link = order.get("yandex_link")
             if link:
                 text_parts.append(f"Ссылка на файлы: {link}")
@@ -702,12 +872,45 @@ async def change_order_status(callback: CallbackQuery, state: FSMContext):
 
     await callback.bot.send_message(
         chat_id,
-        _format_order_message(order, user_to_index=user_to_index),
+        _format_order_compact_html(order, adm=True, user_to_index=user_to_index),
         reply_markup=order_detail_back_kb(
-            is_admin=True, order_id=order_id, current_status=order.get("status")
+            is_admin=True,
+            order_id=order_id,
+            current_status=order.get("status"),
+            in_trash=bool(order.get("deleted_at")),
         ),
         parse_mode="HTML",
     )
+
+
+@router.callback_query(F.data.startswith("purge1:"))
+async def admin_purge_one_from_trash(callback: CallbackQuery, state: FSMContext):
+    """Окончательно удалить заявку из корзины (админ)."""
+    if not callback.from_user or not await is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    try:
+        order_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    from bot.api_client import purge_trash_order_one
+
+    try:
+        await purge_trash_order_one(order_id, callback.from_user.id)
+    except Exception as e:
+        logger.exception("Purge one failed: %s", e)
+        await callback.answer("Не удалось удалить. Проверьте, что заявка в корзине.", show_alert=True)
+        return
+    await callback.answer("Удалена навсегда.")
+    try:
+        await callback.message.edit_text(
+            "Заявка удалена из базы.",
+            reply_markup=None,
+        )
+    except Exception:
+        pass
+    await state.update_data(selected_order_id=None)
 
 
 @router.callback_query(F.data.startswith("del_confirm:"))
@@ -744,7 +947,7 @@ async def confirm_delete_order(callback: CallbackQuery, state: FSMContext):
         return
 
     text = (
-        f"Вы уверены, что хотите удалить заявку №{order['number']}?\n\n"
+        f"Вы уверены, что хотите удалить заявку № {order['number']}?\n\n"
         "⚠️ Это действие нельзя отменить."
     )
     kb = InlineKeyboardMarkup(
@@ -829,12 +1032,16 @@ async def delete_order_yes(callback: CallbackQuery, state: FSMContext):
 
     number = resp.get("number") or order.get("number")
 
+    # Удаляем у админов исходные уведомления с файлом МаркЗнак и кнопкой «Взять в работу»,
+    # чтобы в чате осталось только текстовое уведомление об удалении.
+    await _purge_admin_order_telegram_cards(callback.bot, order_id)
+
     # Удаляем сообщение с деталями и уведомляем пользователя.
     try:
         await callback.message.delete()
     except Exception:
         pass
-    await callback.message.answer(f"Заявка №{number} успешно удалена.")
+    await callback.message.answer(f"Заявка № {number} успешно удалена.")
 
     # Уведомляем админов.
     username = callback.from_user.username or resp.get("author_username") or ""
@@ -843,7 +1050,7 @@ async def delete_order_yes(callback: CallbackQuery, state: FSMContext):
 
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     text = (
-        f"Заявка №{number} была удалена пользователем.\n\n"
+        f"Заявка № {number} была удалена пользователем.\n\n"
         f"Пользователь: {user_label}\n"
         f"Дата удаления: {now}"
     )
@@ -879,7 +1086,7 @@ async def admin_confirm_delete_order(callback: CallbackQuery, state: FSMContext)
         return
 
     text = (
-        f"Вы уверены, что хотите удалить заявку №{order['number']}?\n\n"
+        f"Вы уверены, что хотите удалить заявку № {order['number']}?\n\n"
         "⚠️ Это действие нельзя отменить."
     )
     kb = InlineKeyboardMarkup(
@@ -912,7 +1119,7 @@ async def admin_cancel_delete_order(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("adel_yes:"))
-async def admin_delete_order_yes(callback: CallbackQuery, state: FSMContext):
+async def admin_delete_order_yes(callback: CallbackQuery, state: FSMContext, dispatcher: Dispatcher):
     """Фактическое удаление заявки админом."""
     if not callback.from_user or not await is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён.", show_alert=True)
@@ -943,22 +1150,47 @@ async def admin_delete_order_yes(callback: CallbackQuery, state: FSMContext):
     number = resp.get("number") or order.get("number")
     author_id = resp.get("author_telegram_id") or order.get("author_telegram_id")
 
+    # Убираем у всех админов зарегистрированные уведомления с МаркЗнак (кроме текущего сообщения).
+    if callback.message:
+        await _purge_admin_order_telegram_cards(
+            callback.bot,
+            order_id,
+            skip_chat_id=callback.message.chat.id,
+            skip_message_id=callback.message.message_id,
+        )
+    else:
+        await _purge_admin_order_telegram_cards(callback.bot, order_id)
+
     # Удаляем сообщение с деталями в чате админа.
     try:
         await callback.message.delete()
     except Exception:
         pass
-    await callback.message.answer(f"Заявка №{number} удалена.")
+    await callback.message.answer(f"Заявка № {number} удалена.")
 
-    # Уведомляем пользователя, если он есть.
+    # Уведомляем автора и возвращаем к списку «Мои заявки» (как шаг назад).
     if author_id:
         try:
-            await callback.bot.send_message(
-                chat_id=author_id,
-                text=f"⚠️ Ваша заявка №{number} была удалена администратором.",
+            aid = int(author_id)
+            author_ctx = FSMContext(
+                storage=dispatcher.storage,
+                key=StorageKey(
+                    bot_id=callback.bot.id,
+                    chat_id=aid,
+                    user_id=aid,
+                ),
+            )
+            await _show_my_orders_list_for_user(
+                callback.bot,
+                author_ctx,
+                user_id=aid,
+                chat_id=aid,
+                header_notice=(
+                    f"⚠️ Ваша заявка № {number} была удалена администратором."
+                ),
             )
         except Exception:
-            pass
+            logger.exception("Notify author after admin delete failed")
 
     await callback.answer()
 
@@ -1103,13 +1335,16 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
 
     from bot.handlers.history import _load_admins_tuples, _build_user_color_mapping
     admins_tuples = await _load_admins_tuples()
-    full_orders = await get_orders(admin=True, limit=100)
+    full_orders = await get_orders(admin=True, include_deleted=True, limit=100)
     user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
 
     await callback.message.edit_text(
-        _format_order_message(order, user_to_index=user_to_index),
+        _format_order_compact_html(order, adm=True, user_to_index=user_to_index),
         reply_markup=order_detail_back_kb(
-            is_admin=True, order_id=order_id, current_status=order.get("status")
+            is_admin=True,
+            order_id=order_id,
+            current_status=order.get("status"),
+            in_trash=bool(order.get("deleted_at")),
         ),
         parse_mode="HTML",
     )
@@ -1127,7 +1362,7 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
     # 1) Уведомление новому администратору о передаче заявки.
     try:
         text_new = (
-            f"Вам передана заявка №{order['number']}.\n"
+            f"Вам передана заявка № {order['number']}.\n"
             f"Ответственного назначил: {changer_label}"
         )
         await callback.bot.send_message(chat_id=new_resp_id, text=text_new)
@@ -1138,7 +1373,7 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
             await callback.bot.send_message(
                 chat_id=changer_id,
                 text=(
-                    f"Не смог уведомить {new_label} о передаче заявки №{order['number']}.\n"
+                    f"Не смог уведомить {new_label} о передаче заявки № {order['number']}.\n"
                     f"Пусть он/она нажмёт /start у бота, и повторите назначение."
                 ),
             )
@@ -1150,7 +1385,7 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         try:
             old_label = f"@{old_resp_username}" if old_resp_username else str(old_resp_id)
             text_old = (
-                f"{changer_label} скорректировал ответственного заявки №{order['number']} "
+                f"{changer_label} скорректировал ответственного заявки № {order['number']} "
                 f"с {old_label} на {new_label}."
             )
             await callback.bot.send_message(chat_id=int(old_resp_id), text=text_old)
@@ -1251,30 +1486,21 @@ async def take_order_in_work(callback: CallbackQuery, state: FSMContext):
         await callback.message.reply("Заявка не найдена или не обновлена.")
         return
 
-    # Удаляем сообщения с заявкой у всех остальных админов (реестр снимаем сразу, чтобы не копить мусор)
+    # Удаляем карточки у остальных админов (БД + реестр); текущее сообщение оставляем для подписи.
     taken_by = (
         f"Взял в работу: @{callback.from_user.username}"
         if callback.from_user.username
         else "Заявка взята в работу."
     )
-    notifications = notifications_registry.pop_order(order_id)
-    for entry in notifications:
-        try:
-            # Сообщение, из которого пришёл callback, не трогаем здесь
-            if (
-                callback.message
-                and callback.message.message_id == entry.message_id
-                and callback.message.chat.id == entry.chat_id
-            ):
-                continue
-            # Остальным админам удаляем уведомление целиком
-            await callback.bot.delete_message(
-                chat_id=entry.chat_id,
-                message_id=entry.message_id,
-            )
-        except Exception:
-            # Не блокируем сценарий, если не получилось удалить какое-то уведомление
-            continue
+    if callback.message:
+        await _purge_admin_order_telegram_cards(
+            callback.bot,
+            order_id,
+            skip_chat_id=callback.message.chat.id,
+            skip_message_id=callback.message.message_id,
+        )
+    else:
+        await _purge_admin_order_telegram_cards(callback.bot, order_id)
 
     # Обновляем подпись/текст именно для того сообщения, откуда пришёл callback
     try:
@@ -1287,6 +1513,20 @@ async def take_order_in_work(callback: CallbackQuery, state: FSMContext):
     except Exception:
         # Не критично, если не получилось отредактировать
         pass
+
+    # Карточку у этого админа не удалили — снова пишем в БД, иначе при удалении заявки
+    # нечем удалить сообщение с МаркЗнак из чата.
+    if callback.message:
+        try:
+            await register_order_telegram_posting(
+                order_id,
+                callback.message.chat.id,
+                callback.message.message_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "register_order_telegram_posting after take order=%s: %s", order_id, e
+            )
 
     # Получаем заказ для уведомления автора (отдельное уведомление только здесь)
     try:
@@ -1302,7 +1542,7 @@ async def take_order_in_work(callback: CallbackQuery, state: FSMContext):
         if author_id:
             await callback.bot.send_message(
                 chat_id=author_id,
-                text=f"Ваша заявка №{order['number']} в работе.",
+                text=f"Ваша заявка № {order['number']} в работе.",
             )
     except Exception as e:
         logger.exception("Notify author about in-work failed: %s", e)

@@ -42,10 +42,14 @@ async def get_orders(
     admin: bool = False,
     limit: int = 50,
     offset: int = 0,
+    *,
+    include_deleted: bool = False,
+    deleted_only: bool = False,
 ) -> list[dict]:
     """Get orders list.
     - author_telegram_id: заявки, созданные этим пользователем
     - responsible_telegram_id: заявки, где этот админ ответственный
+    - include_deleted / deleted_only: только для admin-запросов (история / корзина)
     """
     url = f"{get_settings().BACKEND_URL}/orders/"
     params: dict[str, object] = {"limit": limit, "offset": offset}
@@ -57,8 +61,35 @@ async def get_orders(
         params["status"] = status
     if admin:
         params["admin"] = True
+    if include_deleted:
+        params["include_deleted"] = True
+    if deleted_only:
+        params["deleted_only"] = True
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.get(url, params=params)
+        r.raise_for_status()
+        return r.json()
+
+
+async def purge_trash_orders(
+    requester_telegram_id: int,
+    ids: list[int] | None = None,
+) -> dict:
+    """Окончательно удалить заявки из корзины (ids=None или [] — все)."""
+    url = f"{get_settings().BACKEND_URL}/orders/trash/purge"
+    params = {"requester_telegram_id": requester_telegram_id}
+    payload = {"ids": ids}
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.post(url, params=params, json=payload)
+        r.raise_for_status()
+        return r.json()
+
+
+async def purge_trash_order_one(order_id: int, requester_telegram_id: int) -> dict:
+    url = f"{get_settings().BACKEND_URL}/orders/{order_id}/purge"
+    params = {"requester_telegram_id": requester_telegram_id}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.delete(url, params=params)
         r.raise_for_status()
         return r.json()
 
@@ -70,6 +101,23 @@ async def get_order(order_id: int) -> dict | None:
         r = await client.get(url)
         if r.status_code == 404:
             return None
+        r.raise_for_status()
+        return r.json()
+
+
+async def add_order_attachment(
+    order_id: int,
+    *,
+    author_telegram_id: int,
+    telegram_file_id: str,
+    file_name: str | None = None,
+) -> dict:
+    """Зарегистрировать дополнительный файл к заявке (только автор заявки)."""
+    url = f"{get_settings().BACKEND_URL}/orders/{order_id}/attachments"
+    params = {"author_telegram_id": author_telegram_id}
+    payload = {"telegram_file_id": telegram_file_id, "file_name": file_name}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(url, params=params, json=payload)
         r.raise_for_status()
         return r.json()
 
@@ -92,12 +140,47 @@ async def get_markznak_order_excel(order_id: int) -> bytes:
         return r.content
 
 
-async def get_template_excel(article: str, category: str | None = None) -> bytes:
-    """Получить шаблон Excel по запросу (с учётом категории одежды/обуви)."""
+async def get_template_legal_entities(article: str) -> list[str]:
+    """Список юр. лиц для повторного товара по артикулу/наименованию (шаг по ТЗ)."""
+    url = f"{get_settings().BACKEND_URL}/products/template/legal_entities"
+    params: dict[str, str] = {"article": article.strip()}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.get(url, params=params)
+        r.raise_for_status()
+        return list(r.json())
+
+
+async def get_template_countries(
+    article: str,
+    *,
+    legal_entity: str | None = None,
+) -> list[str]:
+    """Список стран для артикула и выбранного ЮЛ (шаг по ТЗ)."""
+    url = f"{get_settings().BACKEND_URL}/products/template/countries"
+    params: dict[str, str] = {"article": article.strip()}
+    if legal_entity and legal_entity.strip():
+        params["legal_entity"] = legal_entity.strip()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.get(url, params=params)
+        r.raise_for_status()
+        return list(r.json())
+
+
+async def get_template_excel(
+    article: str,
+    category: str | None = None,
+    legal_entity: str | None = None,
+    country: str | None = None,
+) -> bytes:
+    """Получить шаблон Excel (макет одежда/обувь + отбор по артикулу, ЮЛ, стране)."""
     url = f"{get_settings().BACKEND_URL}/products/template"
     params: dict[str, str] = {"article": article.strip()}
     if category:
         params["category"] = category
+    if legal_entity and legal_entity.strip():
+        params["legal_entity"] = legal_entity.strip()
+    if country and country.strip():
+        params["country"] = country.strip()
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
@@ -209,6 +292,17 @@ async def update_order(
         return r.json()
 
 
+async def set_order_comment(order_id: int, comment: str | None) -> dict | None:
+    """Обновить только комментарий заявки (null в JSON сбрасывает в БД)."""
+    url = f"{get_settings().BACKEND_URL}/orders/{order_id}"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.patch(url, json={"comment": comment})
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json()
+
+
 async def upsert_user(
     telegram_id: int,
     username: str | None = None,
@@ -285,6 +379,36 @@ async def delete_user(telegram_id: int) -> bool:
             return False
         r.raise_for_status()
         return True
+
+
+async def register_order_telegram_posting(
+    order_id: int, chat_id: int, message_id: int
+) -> None:
+    """Сохранить chat_id/message_id карточки МаркЗнак у админа (переживает перезапуск бота)."""
+    url = f"{get_settings().BACKEND_URL}/orders/{order_id}/telegram_postings"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            url, json={"chat_id": chat_id, "message_id": message_id}
+        )
+        r.raise_for_status()
+
+
+async def list_order_telegram_postings(order_id: int) -> list[dict]:
+    url = f"{get_settings().BACKEND_URL}/orders/{order_id}/telegram_postings"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.get(url)
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        return r.json()
+
+
+async def clear_order_telegram_postings(order_id: int) -> None:
+    url = f"{get_settings().BACKEND_URL}/orders/{order_id}/telegram_postings"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.delete(url)
+        if r.status_code not in (204, 404):
+            r.raise_for_status()
 
 
 async def delete_order(order_id: int, requester_telegram_id: int) -> dict:

@@ -86,9 +86,49 @@ class Order(Base):
     responsible_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(TZ_UTC3))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(TZ_UTC3), onupdate=lambda: datetime.now(TZ_UTC3))
-    
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
     author: Mapped["User"] = relationship("User", back_populates="orders")
     items: Mapped[list["OrderItem"]] = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
+    attachments: Mapped[list["OrderAttachment"]] = relationship(
+        "OrderAttachment", back_populates="order", cascade="all, delete-orphan"
+    )
+    telegram_postings: Mapped[list["OrderTelegramPosting"]] = relationship(
+        "OrderTelegramPosting",
+        back_populates="order",
+        cascade="all, delete-orphan",
+    )
+
+
+class OrderTelegramPosting(Base):
+    """Сообщения в чатах админов с карточкой заявки (МаркЗнак) — для delete_message после удаления/взятия."""
+
+    __tablename__ = "order_telegram_postings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    order: Mapped["Order"] = relationship("Order", back_populates="telegram_postings")
+
+
+class OrderAttachment(Base):
+    """Дополнительные файлы к заявке (после создания), file_id Telegram того же бота."""
+
+    __tablename__ = "order_attachments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    telegram_file_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_name: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(TZ_UTC3))
+
+    order: Mapped["Order"] = relationship("Order", back_populates="attachments")
 
 
 class OrderItem(Base):

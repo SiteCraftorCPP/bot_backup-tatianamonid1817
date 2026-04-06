@@ -64,7 +64,10 @@ async def test_create_order_with_items(client: AsyncClient, test_db_session: Asy
     # Sheets registry should receive one append call with basic info
     assert len(fake_sheets.append_calls) == 1
     order_number, created_at, author, items_summary, status, *_ = fake_sheets.append_calls[0]
-    assert order_number.count("-") == 2
+    assert "_" in order_number and order_number.split("_", 1)[0].isdigit()
+    # Публичный номер: id + числовая часть артикула (33708 из 33708white)
+    oid, art_part = order_number.split("_", 1)
+    assert art_part == "33708"
     # items_summary should mention both positions by quantity
     assert "x2" in items_summary and "x3" in items_summary
     assert status == "создана"
@@ -110,13 +113,46 @@ async def test_download_order_excel_structure(client: AsyncClient, test_db_sessi
     ws = wb.active
 
     # Header row
-    assert ws["A1"].value.startswith("Заявка №")
-    # Table headers (row 5)
-    headers = [ws.cell(row=5, column=col).value for col in range(1, 9)]
+    assert ws["A1"].value.startswith("Заявка № ")
+    # Table headers (row 4)
+    headers = [ws.cell(row=4, column=col).value for col in range(1, 9)]
     assert headers[:4] == ["№", "Артикул", "Наименование", "Цвет"]
 
-    # First data row (row 6)
-    art = ws["B6"].value
-    qty = ws["F6"].value
+    # First data row (row 5)
+    art = ws["B5"].value
+    qty = ws["F5"].value
     assert art == "33708white"
     assert qty == 5
+
+
+@pytest.mark.asyncio
+async def test_order_attachment_register_and_get(client: AsyncClient, test_db_session: AsyncSession):
+    user = User(telegram_id=222, username="u2", full_name="User Two")
+    test_db_session.add(user)
+    await test_db_session.flush()
+    order = Order(number="w-testattach", author_id=user.id, status="создана")
+    test_db_session.add(order)
+    await test_db_session.commit()
+
+    r403 = await client.post(
+        f"/orders/{order.id}/attachments",
+        params={"author_telegram_id": 999},
+        json={"telegram_file_id": "AgACAgIAAxkBAAIB", "file_name": "a.xlsx"},
+    )
+    assert r403.status_code == 403
+
+    r_ok = await client.post(
+        f"/orders/{order.id}/attachments",
+        params={"author_telegram_id": 222},
+        json={"telegram_file_id": "AgACAgIAAxkBAAIB", "file_name": "3215.xlsx"},
+    )
+    assert r_ok.status_code == 200
+    att = r_ok.json()
+    assert att["file_name"] == "3215.xlsx"
+    assert att["telegram_file_id"] == "AgACAgIAAxkBAAIB"
+
+    r_get = await client.get(f"/orders/{order.id}")
+    assert r_get.status_code == 200
+    body = r_get.json()
+    assert len(body.get("extra_attachments") or []) == 1
+    assert body["extra_attachments"][0]["file_name"] == "3215.xlsx"

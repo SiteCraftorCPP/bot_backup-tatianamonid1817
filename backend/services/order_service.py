@@ -1,38 +1,76 @@
 """Order creation and numbering logic."""
-from datetime import datetime, timedelta, timezone
-from sqlalchemy import select, func
+import re
+import uuid
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Order, OrderItem, User, Product
-from database.session import AsyncSessionLocal
-from backend.services.excel_service import generate_order_excel, get_excel_filename
-from backend.services.google_sheets_service import sheets_service
+
+# Order.number — VARCHAR(50): id + "_" + артикул первой позиции
+_ORDER_NUMBER_MAX_LEN = 50
 
 
-TZ_UTC3 = timezone(timedelta(hours=3))
+def _sanitize_article_slug(article: str | None) -> str:
+    """Часть номера после id_: безопасные символы, без пробелов в начале/конце."""
+    if not article:
+        return "na"
+    s = str(article).strip()
+    if not s:
+        return "na"
+    for bad in '<>:"/\\|?*\n\r\t':
+        s = s.replace(bad, "_")
+    s = re.sub(r"\s+", "_", s)
+    return s or "na"
+
+
+def _public_article_part(article: str | None) -> str:
+    """По ТЗ: номер заявки «id_артикул», где артикул — числовая часть (2705 из 2705darksalmon, 33708 из 33708white)."""
+    if not article:
+        return "na"
+    s = str(article).strip()
+    if not s:
+        return "na"
+    m = re.match(r"^(\d+)", s)
+    if m:
+        return m.group(1)
+    return _sanitize_article_slug(article)
+
+
+def build_public_order_number(order_id: int, article: str | None) -> str:
+    """Публичный номер: «31_2705» → в UI «№ 31_2705» (артикул — числа в начале полного артикула первой позиции)."""
+    prefix = f"{order_id}_"
+    slug = _public_article_part(article)
+    room = _ORDER_NUMBER_MAX_LEN - len(prefix)
+    if room < 1:
+        return str(order_id)[:_ORDER_NUMBER_MAX_LEN]
+    if len(slug) > room:
+        slug = slug[:room]
+    return prefix + slug
+
+
+async def assign_public_order_number(db: AsyncSession, order: Order) -> None:
+    """После сохранения позиций: номер заявки = id + артикул первой строки (по id позиции)."""
+    stmt = (
+        select(OrderItem)
+        .where(OrderItem.order_id == order.id)
+        .order_by(OrderItem.id.asc())
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    first = result.scalar_one_or_none()
+    art: str | None = None
+    if first:
+        art = first.article
+        if not art and first.product_id:
+            prod = await db.get(Product, first.product_id)
+            if prod:
+                art = prod.article
+    order.number = build_public_order_number(order.id, art)
 
 
 async def generate_order_number(db: AsyncSession) -> str:
-    """Generate next order number: YYYY-MM-NNN (e.g. 2026-02-025).
-
-    Берём НЕ count(*), а максимальный существующий номер и увеличиваем суффикс.
-    Так мы не попадаем в UNIQUE-конфликт, если какие-то заявки были удалены.
-    """
-    today = datetime.now(TZ_UTC3)
-    prefix = today.strftime("%Y-%m")
-    stmt = select(func.max(Order.number)).where(Order.number.like(f"{prefix}-%"))
-    result = await db.execute(stmt)
-    max_number: str | None = result.scalar()
-    if not max_number:
-        return f"{prefix}-001"
-    try:
-        # Ожидаемый формат: YYYY-MM-NNN
-        last_part = max_number.split("-")[-1]
-        last_int = int(last_part)
-    except Exception:
-        # На всякий случай, если формат неожиданный — начинаем с 1
-        last_int = 0
-    return f"{prefix}-{last_int + 1:03d}"
+    """Уникальный временный номер до финального присвоения id_артикул (после flush)."""
+    return f"w-{uuid.uuid4().hex}"
 
 
 async def get_or_create_user(

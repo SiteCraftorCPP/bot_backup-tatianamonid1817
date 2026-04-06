@@ -36,9 +36,14 @@ from bot.api_client import (
     get_markznak_order_excel,
     get_brands,
     admin_telegram_ids_for_notify,
+    register_order_telegram_posting,
 )
 from config import get_settings
 from bot.notification_registry import notifications_registry
+from backend.services.excel_service import (
+    get_markznak_download_filename,
+    get_order_excel_download_filename,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -351,6 +356,9 @@ async def process_new_template_file(message: Message, state: FSMContext):
         await message.answer("Ошибка при создании заявки. Попробуйте позже.")
         return
 
+    codes_total = sum(
+        int(i.get("quantity") or 0) for i in (order.get("items") or [])
+    )
     settings = get_settings()
     try:
         excel_bytes = await get_markznak_order_excel(order["id"])
@@ -363,17 +371,15 @@ async def process_new_template_file(message: Message, state: FSMContext):
         try:
             admin_ids = await admin_telegram_ids_for_notify()
             doc_out = FSInputFile(
-                tmp_path, filename=f"Заявка_{order['number']}_markznak.xlsx"
+                tmp_path, filename=get_markznak_download_filename(order["number"])
             )
             caption_lines = [
-                f"Новая заявка №{order['number'].split('-')[-1]} (новые товары)",
+                f"Новая заявка № {order['number']} (новый товар)",
                 f"Создал: @{user.username or 'user'}",
-                f"Позиций: {len(order.get('items', []))}",
-                f"Дата: {order['created_at'][:19].replace('T', ' ')}",
+                f"Количество наклеек: {codes_total}",
             ]
             if order.get("comment"):
                 caption_lines.append(f"Комментарий: {order['comment']}")
-            caption_lines.append("Файл во вложении")
             caption = "\n".join(caption_lines)
             markup = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -400,6 +406,16 @@ async def process_new_template_file(message: Message, state: FSMContext):
                         is_document=True,
                         file_id=sent.document.file_id if sent.document else None,
                     )
+                    try:
+                        await register_order_telegram_posting(
+                            order["id"], sent.chat.id, sent.message_id
+                        )
+                    except Exception as reg_err:
+                        logger.warning(
+                            "register_order_telegram_posting order=%s: %s",
+                            order["id"],
+                            reg_err,
+                        )
                 except Exception as e:
                     logger.exception("Send to admin %s failed: %s", admin_id, e)
         finally:
@@ -408,7 +424,7 @@ async def process_new_template_file(message: Message, state: FSMContext):
         logger.exception("Send to work chat (new-template) failed: %s", e)
     await state.clear()
     await message.answer(
-        f"Заявка №{order['number']} создана. Позиций: {len(order.get('items', []))}",
+        f"Заявка № {order['number']} создана. Количество наклеек: {codes_total}.",
         reply_markup=main_menu_kb(is_admin=is_admin(user.id)),
     )
 
@@ -589,11 +605,16 @@ async def process_confirm(message: Message, state: FSMContext):
             tmp_path = f.name
         try:
             admin_ids = await admin_telegram_ids_for_notify()
-            doc = FSInputFile(tmp_path, filename=f"Заявка_{order['number']}.xlsx")
+            doc = FSInputFile(
+                tmp_path, filename=get_order_excel_download_filename(order["number"])
+            )
+            codes_total = sum(
+                int(i.get("quantity") or 0) for i in (order.get("items") or [])
+            )
             caption_lines = [
-                f"Новая заявка №{order['number'].split('-')[-1]}",
+                f"Новая заявка № {order['number']}",
                 f"Создал: @{user.username or 'user'}",
-                f"Позиций: {len(order.get('items', []))}",
+                f"Количество наклеек: {codes_total}",
                 f"Дата: {order['created_at'][:19].replace('T', ' ')}",
             ]
             if data.get("comment"):
@@ -625,6 +646,16 @@ async def process_confirm(message: Message, state: FSMContext):
                         is_document=True,
                         file_id=sent.document.file_id if sent.document else None,
                     )
+                    try:
+                        await register_order_telegram_posting(
+                            order["id"], sent.chat.id, sent.message_id
+                        )
+                    except Exception as reg_err:
+                        logger.warning(
+                            "register_order_telegram_posting order=%s: %s",
+                            order["id"],
+                            reg_err,
+                        )
                 except Exception as e:
                     logger.exception("Send to admin %s failed: %s", admin_id, e)
         finally:
@@ -634,7 +665,7 @@ async def process_confirm(message: Message, state: FSMContext):
     await state.clear()
     is_adm = is_admin(user.id)
     await message.answer(
-        f"Заявка №{order['number']} создана.",
+        f"Заявка № {order['number']} создана.",
         reply_markup=main_menu_kb(is_admin=is_adm),
     )
 

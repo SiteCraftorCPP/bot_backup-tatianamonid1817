@@ -219,3 +219,149 @@ async def test_create_order_from_template_respects_brand_and_legal_entity(
     assert item["product_id"] == p_flowlab.id
     assert item["brand"] == "Flow Lab"
     assert item["legal_entity"] == "Чайковский"
+
+
+@pytest.mark.asyncio
+async def test_template_legal_entities_and_countries_and_filters(
+    client: AsyncClient,
+    test_db_session: AsyncSession,
+):
+    """Повторный товар: списки ЮЛ/стран и сужение шаблона по query-параметрам."""
+    p1 = Product(
+        article="2801",
+        size="M",
+        name="Товар 2801 Малец КНР",
+        brand="B",
+        color="black",
+        tnved_code="6202400009",
+        composition="cotton",
+        country="КНР",
+        target_gender="ЖЕНСКИЙ",
+        category="X",
+        legal_entity="Малец",
+    )
+    p2 = Product(
+        article="2801",
+        size="M",
+        name="Товар 2801 Банишевский РФ",
+        brand="B",
+        color="black",
+        tnved_code="6202400009",
+        composition="cotton",
+        country="Россия",
+        target_gender="ЖЕНСКИЙ",
+        category="X",
+        legal_entity="Банишевский",
+    )
+    p3 = Product(
+        article="2801",
+        size="L",
+        name="Товар 2801 Малец Киргизия",
+        brand="B",
+        color="black",
+        tnved_code="6202400009",
+        composition="cotton",
+        country="Киргизия",
+        target_gender="ЖЕНСКИЙ",
+        category="X",
+        legal_entity="Малец",
+    )
+    test_db_session.add_all([p1, p2, p3])
+    await test_db_session.commit()
+
+    r_le = await client.get("/products/template/legal_entities", params={"article": "2801"})
+    assert r_le.status_code == 200
+    les = sorted(r_le.json())
+    assert les == ["Банишевский", "Малец"]
+
+    r_cn = await client.get(
+        "/products/template/countries",
+        params={"article": "2801", "legal_entity": "Малец"},
+    )
+    assert r_cn.status_code == 200
+    countries = sorted(r_cn.json())
+    assert countries == ["КНР", "Киргизия"]
+
+    r_tpl = await client.get(
+        "/products/template",
+        params={"article": "2801", "legal_entity": "Малец", "country": "КНР"},
+    )
+    assert r_tpl.status_code == 200
+    wb = load_workbook(io.BytesIO(r_tpl.content))
+    ws = wb.active
+    articles = [ws.cell(row=row, column=2).value for row in range(2, ws.max_row + 1)]
+    assert articles == ["2801"]
+    sizes = [ws.cell(row=row, column=3).value for row in range(2, ws.max_row + 1)]
+    assert sizes == ["M"]
+
+
+@pytest.mark.asyncio
+async def test_template_countries_includes_rows_when_legal_entity_has_trailing_space(
+    client: AsyncClient,
+    test_db_session: AsyncSession,
+):
+    """ЮЛ с пробелом в конце в БД не должен выпадать из фильтра — иначе «теряется» страна."""
+    p_ru = Product(
+        article="spacetest",
+        size="S",
+        name="Space test RU",
+        brand="B",
+        legal_entity="Банишевский ",  # как часто бывает в выгрузках
+        country="Россия",
+    )
+    p_kg = Product(
+        article="spacetest",
+        size="M",
+        name="Space test KG",
+        brand="B",
+        legal_entity="Банишевский",
+        country="Киргизия",
+    )
+    test_db_session.add_all([p_ru, p_kg])
+    await test_db_session.commit()
+
+    r_le = await client.get("/products/template/legal_entities", params={"article": "spacetest"})
+    assert r_le.status_code == 200
+    assert r_le.json() == ["Банишевский"]
+
+    r_cn = await client.get(
+        "/products/template/countries",
+        params={"article": "spacetest", "legal_entity": "Банишевский"},
+    )
+    assert r_cn.status_code == 200
+    assert sorted(r_cn.json()) == ["Киргизия", "Россия"]
+
+
+@pytest.mark.asyncio
+async def test_template_countries_by_article_and_le_not_by_clothing_shoes(
+    client: AsyncClient,
+    test_db_session: AsyncSession,
+):
+    """По ТЗ страны считаются по артикулу и ЮЛ; тип одежда/обувь на шаге стран не режет справочник."""
+    p_od = Product(
+        article="catmix",
+        size="S",
+        name="Одежда КНР",
+        brand="B",
+        legal_entity="ЮЛ1",
+        country="КНР",
+        tnved_code="6202400009",
+    )
+    p_shoe = Product(
+        article="catmix",
+        size="40",
+        name="Обувь РФ",
+        brand="B",
+        legal_entity="ЮЛ1",
+        country="Россия",
+        tnved_code="6403990000",
+    )
+    test_db_session.add_all([p_od, p_shoe])
+    await test_db_session.commit()
+
+    r_cn = await client.get(
+        "/products/template/countries",
+        params={"article": "catmix", "legal_entity": "ЮЛ1"},
+    )
+    assert r_cn.status_code == 200
+    assert sorted(r_cn.json()) == ["КНР", "Россия"]

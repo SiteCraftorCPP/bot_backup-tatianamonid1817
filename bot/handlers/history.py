@@ -1,12 +1,12 @@
 """History of orders - admin only."""
 import logging
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 
 from config import get_settings
-from bot.api_client import get_orders, get_order, list_admins, get_user
-from bot.keyboards import main_menu_kb, orders_list_inline, order_detail_back_kb
+from bot.api_client import get_orders, get_order, list_admins, get_user, purge_trash_orders
+from bot.keyboards import main_menu_kb, orders_list_inline
 from bot.handlers.main_menu import is_admin as _is_admin
 
 router = Router()
@@ -30,28 +30,31 @@ async def history_back(callback: CallbackQuery, state: FSMContext):
 
     data = await state.get_data()
     status_key = data.get("status_filter") or "all"
-    status = None if status_key == "all" else status_key
     selected_admin_id = data.get("admin_filter")
     filters_collapsed = bool(data.get("filters_collapsed", False))
 
     try:
         admins_tuples = await _load_admins_tuples()
-        full_orders = await get_orders(admin=True, limit=100)
+        full_orders = await fetch_history_full_orders_for_colors()
         user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
 
         # 1) Сначала откатываем фильтр по админу (к "Все админы")
         if selected_admin_id is not None:
             selected_admin_id = None
-            orders = await get_orders(admin=True, status=status, limit=100)
+            orders = await fetch_history_orders_list(status_key, admin_filter_id=None)
             admin_buttons = _build_admin_filter_buttons(
                 admins_tuples,
                 user_to_index,
                 selected_admin_id=None,
                 collapse_others_when_selected=True,
             )
-            items = [(o["id"], o["number"], o["status"]) for o in orders]
+            items = [
+                (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+                for o in orders
+            ]
             has_next = len(orders) > ORDERS_PER_PAGE
-            title = f"==================================================\nИстория заявок ({status or 'все'}):"
+            title = f"==================================================\nИстория заявок ({_pretty_status_key(status_key)}):"
+            tw = _history_trash_inline_kw(status_key, data)
             await _safe_edit_card(
                 callback,
                 f"{title}\n\nВыберите заявку для просмотра:",
@@ -67,6 +70,7 @@ async def history_back(callback: CallbackQuery, state: FSMContext):
                     filters_back_callback=("fltmenu" if filters_collapsed else None),
                     filters_back_text=_pretty_status_key(status_key),
                     back_callback="hist_back",
+                    **tw,
                 ),
             )
             await state.update_data(
@@ -84,15 +88,17 @@ async def history_back(callback: CallbackQuery, state: FSMContext):
         # 2) Потом откатываем статус (к "Все")
         if status_key != "all":
             status_key = "all"
-            status = None
-            orders = await get_orders(admin=True, limit=100)
+            orders = await fetch_history_orders_list("all", admin_filter_id=None)
             admin_buttons = _build_admin_filter_buttons(
                 admins_tuples,
                 user_to_index,
                 selected_admin_id=None,
                 collapse_others_when_selected=True,
             )
-            items = [(o["id"], o["number"], o["status"]) for o in orders]
+            items = [
+                (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+                for o in orders
+            ]
             has_next = len(orders) > ORDERS_PER_PAGE
             title = "==================================================\nИстория заявок (все):"
             await _safe_edit_card(
@@ -108,6 +114,7 @@ async def history_back(callback: CallbackQuery, state: FSMContext):
                     filter_mode="history",
                     admin_labels=admin_buttons,
                     back_callback="hist_back",
+                    **_history_trash_inline_kw("all", {**data, "trash_selected_ids": []}),
                 ),
             )
             await state.update_data(
@@ -118,6 +125,7 @@ async def history_back(callback: CallbackQuery, state: FSMContext):
                 admin_filter=None,
                 admin_labels=admin_buttons,
                 filters_collapsed=False,
+                trash_selected_ids=[],
             )
             await callback.answer()
             return
@@ -146,6 +154,8 @@ def _pretty_status_key(status_key: str | None) -> str:
     """Красивое название раздела для UI."""
     if not status_key or status_key == "all":
         return "Все"
+    if status_key == "trash":
+        return "Корзина"
     mapping = {
         "создана": "Создана",
         "в работе": "В работе",
@@ -153,6 +163,65 @@ def _pretty_status_key(status_key: str | None) -> str:
         "отправлена": "Отправлена",
     }
     return mapping.get(status_key, str(status_key))
+
+
+async def fetch_history_orders_list(
+    status_key: str,
+    *,
+    admin_filter_id: int | None,
+) -> list[dict]:
+    """Загрузка списка для истории: «все» с удалёнными, корзина, или фильтр по статусу."""
+    if status_key == "trash":
+        kw: dict = {"admin": True, "deleted_only": True, "limit": 100}
+        if admin_filter_id is not None:
+            kw["responsible_telegram_id"] = admin_filter_id
+        return await get_orders(**kw)
+    if status_key == "all":
+        kw = {"admin": True, "include_deleted": True, "limit": 100}
+        if admin_filter_id is not None:
+            kw["responsible_telegram_id"] = admin_filter_id
+        return await get_orders(**kw)
+    kw = {"admin": True, "status": status_key, "limit": 100}
+    if admin_filter_id is not None:
+        kw["responsible_telegram_id"] = admin_filter_id
+    return await get_orders(**kw)
+
+
+async def fetch_history_full_orders_for_colors() -> list[dict]:
+    """Полный пул заявок (включая корзину) для стабильных цветов админов."""
+    return await get_orders(admin=True, include_deleted=True, limit=100)
+
+
+def _history_order_row_caption(o: dict, user_to_index: dict) -> str:
+    """Подпись строки заявки в списке истории (статус + ответственный)."""
+    resp = o.get("responsible_username") or ""
+    status = o["status"]
+    if o.get("deleted_at"):
+        status = f"{status} 🗑"
+    if not resp:
+        return status
+    label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
+    return f"{status} — {label}"
+
+
+def _history_trash_inline_kw(status_key: str, state_data: dict) -> dict:
+    """Параметры клавиатуры для режима корзины (чекбоксы и массовое удаление)."""
+    if status_key != "trash":
+        return {
+            "trash_mode": False,
+            "trash_toolbar": False,
+            "trash_selected_ids": None,
+        }
+    raw = state_data.get("trash_selected_ids") or []
+    try:
+        sel = frozenset(int(x) for x in raw)
+    except (TypeError, ValueError):
+        sel = frozenset()
+    return {
+        "trash_mode": True,
+        "trash_toolbar": True,
+        "trash_selected_ids": sel,
+    }
 
 
 COLORS = ["🟢", "🟠", "🔵", "🟣", "🟡", "🟤", "🔴", "⚫", "⚪"]
@@ -289,7 +358,7 @@ async def history_orders(message: Message, state: FSMContext):
         return
     await state.clear()
     try:
-        orders = await get_orders(admin=True, limit=100)
+        orders = await fetch_history_orders_list("all", admin_filter_id=None)
     except Exception as e:
         logger.exception("Get orders failed: %s", e)
         await message.answer("Ошибка загрузки заявок. Попробуйте позже.")
@@ -299,18 +368,15 @@ async def history_orders(message: Message, state: FSMContext):
         return
 
     admins_tuples = await _load_admins_tuples()
-    user_to_index, _ = _build_user_color_mapping(orders, admins_tuples)
+    full_orders = await fetch_history_full_orders_for_colors()
+    user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
     admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=None)
 
-    def _status_with_responsible(o: dict) -> str:
-        resp = o.get("responsible_username") or ""
-        if not resp:
-            return f"{o['status']}"
-        label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
-        return f"{o['status']} — {label}"
-
-    items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
+    items = [
+        (o["id"], o["number"], _history_order_row_caption(o, user_to_index)) for o in orders
+    ]
     has_next = len(orders) > ORDERS_PER_PAGE
+    tw = _history_trash_inline_kw("all", {"trash_selected_ids": []})
     await message.answer(
         "==================================================\nИстория заявок (все):\n\nВыберите заявку для просмотра:",
         reply_markup=orders_list_inline(
@@ -323,6 +389,7 @@ async def history_orders(message: Message, state: FSMContext):
             filter_mode="history",
             admin_labels=admin_buttons,
             back_callback="hist_back",
+            **tw,
         ),
     )
     await state.update_data(
@@ -333,6 +400,7 @@ async def history_orders(message: Message, state: FSMContext):
         filters_collapsed=False,
         admin_filter=None,
         admin_labels=admin_buttons,
+        trash_selected_ids=[],
     )
 
 
@@ -349,12 +417,13 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     filters_collapsed = bool(data.get("filters_collapsed", False))
     status_key = data.get("status_filter") or "all"
-    status = None if status_key == "all" else status_key
     selected_admin_id = data.get("admin_filter")
     try:
-        orders = await get_orders(admin=True, status=status, limit=100)
+        orders = await fetch_history_orders_list(
+            status_key, admin_filter_id=selected_admin_id
+        )
         admins_tuples = await _load_admins_tuples()
-        full_orders = await get_orders(admin=True, limit=100)
+        full_orders = await fetch_history_full_orders_for_colors()
         user_to_index, admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
         admin_buttons = _build_admin_filter_buttons(
             admins_tuples,
@@ -367,9 +436,11 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ошибка загрузки.", show_alert=True)
         return
 
+    tw = _history_trash_inline_kw(status_key, data)
+    title_cat = _pretty_status_key(status_key)
     if not orders:
         await callback.message.edit_text(
-            f"==================================================\nИстория заявок ({status or 'все'}):\n\nЗаявок не найдено.",
+            f"==================================================\nИстория заявок ({title_cat}):\n\nЗаявок не найдено.",
             reply_markup=orders_list_inline(
                 [],
                 page=0,
@@ -380,19 +451,16 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
                 filter_mode="history",
                 admin_labels=admin_buttons,
                 back_callback="hist_back",
+                **tw,
             ),
         )
     else:
-        def _status_with_responsible(o: dict) -> str:
-            resp = o.get("responsible_username") or ""
-            if not resp:
-                return f"{o['status']}"
-            label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
-            return f"{o['status']} — {label}"
-
-        items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
+        items = [
+            (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+            for o in orders
+        ]
         has_next = len(orders) > ORDERS_PER_PAGE
-        title = f"==================================================\nИстория заявок ({status or 'все'}):"
+        title = f"==================================================\nИстория заявок ({title_cat}):"
         await callback.message.edit_text(
             f"{title}\n\nВыберите заявку для просмотра:",
             reply_markup=orders_list_inline(
@@ -405,6 +473,7 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
                 filter_mode="history",
                 admin_labels=admin_buttons,
                 back_callback="hist_back",
+                **tw,
             ),
         )
 
@@ -433,7 +502,6 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     filters_collapsed = bool(data.get("filters_collapsed", False))
     status_key = data.get("status_filter") or "all"
-    status = None if status_key == "all" else status_key
 
     raw = callback.data.split(":", 1)[1]
     selected_admin_id: int | None
@@ -447,17 +515,11 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
             return
 
     try:
-        if selected_admin_id is None:
-            orders = await get_orders(admin=True, status=status, limit=100)
-        else:
-            orders = await get_orders(
-                admin=True,
-                status=status,
-                responsible_telegram_id=selected_admin_id,
-                limit=100,
-            )
+        orders = await fetch_history_orders_list(
+            status_key, admin_filter_id=selected_admin_id
+        )
         admins_tuples = await _load_admins_tuples()
-        full_orders = await get_orders(admin=True, limit=100)
+        full_orders = await fetch_history_full_orders_for_colors()
         user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
         admin_buttons = _build_admin_filter_buttons(
             admins_tuples,
@@ -470,9 +532,11 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ошибка загрузки.", show_alert=True)
         return
 
+    tw = _history_trash_inline_kw(status_key, data)
+    title_cat = _pretty_status_key(status_key)
     if not orders:
         await callback.message.edit_text(
-            f"==================================================\nИстория заявок ({status or 'все'}):\n\nЗаявок не найдено.",
+            f"==================================================\nИстория заявок ({title_cat}):\n\nЗаявок не найдено.",
             reply_markup=orders_list_inline(
                 [],
                 page=0,
@@ -485,19 +549,16 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
                 filters_back_callback=("fltmenu" if filters_collapsed else None),
                 filters_back_text=_pretty_status_key(status_key),
                 back_callback="hist_back",
+                **tw,
             ),
         )
     else:
-        def _status_with_responsible(o: dict) -> str:
-            resp = o.get("responsible_username") or ""
-            if not resp:
-                return f"{o['status']}"
-            label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
-            return f"{o['status']} — {label}"
-
-        items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
+        items = [
+            (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+            for o in orders
+        ]
         has_next = len(orders) > ORDERS_PER_PAGE
-        title = f"==================================================\nИстория заявок ({status or 'все'}):"
+        title = f"==================================================\nИстория заявок ({title_cat}):"
         await callback.message.edit_text(
             f"{title}\n\nВыберите заявку для просмотра:",
             reply_markup=orders_list_inline(
@@ -512,6 +573,7 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
                 filters_back_callback=("fltmenu" if filters_collapsed else None),
                 filters_back_text=_pretty_status_key(status_key),
                 back_callback="hist_back",
+                **tw,
             ),
         )
 
@@ -537,6 +599,15 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
     mode = data.get("mode", "my")
     user_id = callback.from_user.id
     status = None if status_key == "all" else status_key
+    prev_status = data.get("status_filter") or "all"
+    if status_key == "trash":
+        trash_selected_ids = (
+            []
+            if prev_status != "trash"
+            else (data.get("trash_selected_ids") or [])
+        )
+    else:
+        trash_selected_ids = []
 
     # Если FSM state слетел, но клик был в "Истории заявок" (там есть admflt:*),
     # то это history-flow, иначе этот хендлер уедет в ветку "Мои заявки" и перезапишет mode.
@@ -561,15 +632,19 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
             if not await _is_admin(user_id):
                 await callback.answer("Доступ запрещён.", show_alert=True)
                 return
-            orders = await get_orders(admin=True, status=status, limit=100)
+            orders = await fetch_history_orders_list(status_key, admin_filter_id=None)
             admins_tuples = await _load_admins_tuples()
-            full_orders = await get_orders(admin=True, limit=100)
+            full_orders = await fetch_history_full_orders_for_colors()
             user_to_index, admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
             admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=None)
+            tw = _history_trash_inline_kw(
+                status_key, {**data, "trash_selected_ids": trash_selected_ids}
+            )
+            title_cat = _pretty_status_key(status_key)
 
             if not orders:
                 await callback.message.edit_text(
-                    f"==================================================\nИстория заявок ({status or 'все'}):\n\nЗаявок не найдено.",
+                    f"==================================================\nИстория заявок ({title_cat}):\n\nЗаявок не найдено.",
                     reply_markup=orders_list_inline(
                         [],
                         page=0,
@@ -582,19 +657,16 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
                         filters_back_callback="fltmenu",
                         filters_back_text=_pretty_status_key(status_key),
                         back_callback="hist_back",
+                        **tw,
                     ),
                 )
             else:
-                def _status_with_responsible(o: dict) -> str:
-                    resp = o.get("responsible_username") or ""
-                    if not resp:
-                        return f"{o['status']}"
-                    label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
-                    return f"{o['status']} — {label}"
-
-                items = [(o["id"], o["number"], _status_with_responsible(o)) for o in orders]
+                items = [
+                    (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+                    for o in orders
+                ]
                 has_next = len(orders) > ORDERS_PER_PAGE
-                title = f"==================================================\nИстория заявок ({status or 'все'}):"
+                title = f"==================================================\nИстория заявок ({title_cat}):"
                 await callback.message.edit_text(
                     f"{title}\n\nВыберите заявку для просмотра:",
                     reply_markup=orders_list_inline(
@@ -609,6 +681,7 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
                         filters_back_callback="fltmenu",
                         filters_back_text=_pretty_status_key(status_key),
                         back_callback="hist_back",
+                        **tw,
                     ),
                 )
             await state.update_data(
@@ -619,6 +692,7 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
                 admin_filter=None,
                 admin_labels=admin_buttons,
                 filters_collapsed=True,
+                trash_selected_ids=trash_selected_ids,
             )
             return
         # Фильтр для «Моих заявок» (пользователь или админ)
@@ -762,3 +836,195 @@ async def admin_filter_separator(callback: CallbackQuery, state: FSMContext):
 async def admin_filter_noop(callback: CallbackQuery, state: FSMContext):
     """Неактивная кнопка с именем админа (визуальный список сотрудников)."""
     await callback.answer()
+
+
+async def _history_redraw_current_list(callback: CallbackQuery, state: FSMContext) -> None:
+    """Перерисовать текущий список истории (тот же фильтр и страница)."""
+    data = await state.get_data()
+    status_key = data.get("status_filter") or "all"
+    page = int(data.get("page") or 0)
+    selected_admin_id = data.get("admin_filter")
+    filters_collapsed = bool(data.get("filters_collapsed", False))
+
+    orders = await fetch_history_orders_list(status_key, admin_filter_id=selected_admin_id)
+    await state.update_data(orders=orders)
+
+    admins_tuples = await _load_admins_tuples()
+    full_orders = await fetch_history_full_orders_for_colors()
+    user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
+    admin_buttons = _build_admin_filter_buttons(
+        admins_tuples,
+        user_to_index,
+        selected_admin_id=selected_admin_id,
+        collapse_others_when_selected=True,
+    )
+    tw = _history_trash_inline_kw(status_key, await state.get_data())
+    title_cat = _pretty_status_key(status_key)
+    start = page * ORDERS_PER_PAGE
+    has_next = len(orders) > start + ORDERS_PER_PAGE
+
+    if not orders:
+        await callback.message.edit_text(
+            f"==================================================\nИстория заявок ({title_cat}):\n\nЗаявок не найдено.",
+            reply_markup=orders_list_inline(
+                [],
+                page=0,
+                has_next=False,
+                prefix="ord",
+                show_filters=not filters_collapsed,
+                current_filter=status_key,
+                filter_mode="history",
+                admin_labels=admin_buttons,
+                filters_back_callback=("fltmenu" if filters_collapsed else None),
+                filters_back_text=_pretty_status_key(status_key),
+                back_callback="hist_back",
+                **tw,
+            ),
+        )
+        return
+
+    items = [
+        (o["id"], o["number"], _history_order_row_caption(o, user_to_index)) for o in orders
+    ]
+    title = f"==================================================\nИстория заявок ({title_cat}):"
+    await callback.message.edit_text(
+        f"{title}\n\nВыберите заявку для просмотра:",
+        reply_markup=orders_list_inline(
+            items,
+            page=page,
+            has_next=has_next,
+            prefix="ord",
+            show_filters=not filters_collapsed,
+            current_filter=status_key,
+            filter_mode="history",
+            admin_labels=admin_buttons,
+            filters_back_callback=("fltmenu" if filters_collapsed else None),
+            filters_back_text=_pretty_status_key(status_key),
+            back_callback="hist_back",
+            **tw,
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("trshsel:"))
+async def history_trash_toggle_select(callback: CallbackQuery, state: FSMContext):
+    """Переключить выбор заявки в корзине для массового удаления."""
+    if not callback.from_user or not await _is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    data = await state.get_data()
+    if data.get("status_filter") != "trash":
+        await callback.answer()
+        return
+    try:
+        oid = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка.", show_alert=True)
+        return
+    sel = list(data.get("trash_selected_ids") or [])
+    if oid in sel:
+        sel.remove(oid)
+    else:
+        sel.append(oid)
+    await state.update_data(trash_selected_ids=sel)
+    await _history_redraw_current_list(callback, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "trshdel:sel")
+async def history_trash_delete_selected_ask(callback: CallbackQuery, state: FSMContext):
+    if not callback.from_user or not await _is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    data = await state.get_data()
+    sel = list(data.get("trash_selected_ids") or [])
+    if not sel:
+        await callback.answer("Не выбрано ни одной заявки.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"Удалить навсегда выбранные заявки ({len(sel)} шт.) из базы?",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Да, удалить",
+                        callback_data="trshdel_sel_yes",
+                    ),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data="trshdel_cancel"),
+                ],
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "trshdel:all")
+async def history_trash_delete_all_ask(callback: CallbackQuery, state: FSMContext):
+    if not callback.from_user or not await _is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    data = await state.get_data()
+    n = len(data.get("orders") or [])
+    await callback.message.edit_text(
+        f"Удалить навсегда все заявки в корзине ({n} шт.) из базы?",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Да, удалить все",
+                        callback_data="trshdel_all_yes",
+                    ),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data="trshdel_cancel"),
+                ],
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "trshdel_cancel")
+async def history_trash_purge_cancel(callback: CallbackQuery, state: FSMContext):
+    if not callback.from_user or not await _is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    await _history_redraw_current_list(callback, state)
+    await callback.answer("Отменено.")
+
+
+@router.callback_query(F.data == "trshdel_sel_yes")
+async def history_trash_delete_selected_do(callback: CallbackQuery, state: FSMContext):
+    if not callback.from_user or not await _is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    data = await state.get_data()
+    sel = list(data.get("trash_selected_ids") or [])
+    if not sel:
+        await callback.answer("Список пуст.", show_alert=True)
+        await _history_redraw_current_list(callback, state)
+        return
+    try:
+        await purge_trash_orders(callback.from_user.id, ids=sel)
+    except Exception as e:
+        logger.exception("purge_trash_orders failed: %s", e)
+        await callback.answer("Ошибка удаления.", show_alert=True)
+        return
+    await state.update_data(trash_selected_ids=[], page=0)
+    await _history_redraw_current_list(callback, state)
+    await callback.answer(f"Удалено: {len(sel)}.")
+
+
+@router.callback_query(F.data == "trshdel_all_yes")
+async def history_trash_delete_all_do(callback: CallbackQuery, state: FSMContext):
+    if not callback.from_user or not await _is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    try:
+        res = await purge_trash_orders(callback.from_user.id, ids=None)
+    except Exception as e:
+        logger.exception("purge_trash all failed: %s", e)
+        await callback.answer("Ошибка удаления.", show_alert=True)
+        return
+    n = int(res.get("purged") or 0)
+    await state.update_data(trash_selected_ids=[], page=0)
+    await _history_redraw_current_list(callback, state)
+    await callback.answer(f"Удалено из базы: {n}.")

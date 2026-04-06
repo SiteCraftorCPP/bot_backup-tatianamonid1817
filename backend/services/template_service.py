@@ -476,7 +476,7 @@ def add_order_header_to_excel(
     wb = openpyxl.load_workbook(io.BytesIO(content))
     ws = wb.active
     ws.insert_rows(1, 4)  # Вставить 4 пустые строки сверху
-    ws["A1"] = f"Заявка №{order_number}"
+    ws["A1"] = f"Заявка № {order_number}"
     ws["A1"].font = Font(bold=True, size=14)
     ws["A2"] = f"Дата: {created_at.strftime('%d.%m.%Y %H:%M')}"
     ws["A3"] = f"Автор: {author}"

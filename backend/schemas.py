@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ProductResponse(BaseModel):
@@ -50,6 +50,32 @@ class OrderCreate(BaseModel):
     items: list[OrderItemCreate]
 
 
+class OrderAttachmentCreate(BaseModel):
+    telegram_file_id: str
+    file_name: Optional[str] = None
+
+
+class OrderAttachmentResponse(BaseModel):
+    id: int
+    telegram_file_id: str
+    file_name: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class OrderTelegramPostingCreate(BaseModel):
+    chat_id: int
+    message_id: int
+
+
+class OrderTelegramPostingResponse(BaseModel):
+    chat_id: int
+    message_id: int
+
+    model_config = {"from_attributes": True}
+
+
 class OrderItemResponse(BaseModel):
     id: int
     product_id: Optional[int] = None
@@ -72,6 +98,7 @@ class OrderResponse(BaseModel):
     author_id: int
     author_telegram_id: Optional[int] = None
     author_username: Optional[str] = None
+    author_full_name: Optional[str] = None
     status: str
     order_type: Optional[str] = None
     ms_order_number: Optional[str] = None
@@ -80,7 +107,10 @@ class OrderResponse(BaseModel):
     responsible_telegram_id: Optional[int] = None
     responsible_username: Optional[str] = None
     created_at: datetime
+    updated_at: datetime
+    deleted_at: Optional[datetime] = None
     items: list[OrderItemResponse] = []
+    extra_attachments: list[OrderAttachmentResponse] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -90,6 +120,7 @@ class OrderUpdate(BaseModel):
     yandex_link: Optional[str] = None
     responsible_telegram_id: Optional[int] = None
     responsible_username: Optional[str] = None
+    comment: Optional[str] = None
 
 
 class OrderListResponse(BaseModel):
@@ -100,6 +131,13 @@ class OrderListResponse(BaseModel):
     author_username: Optional[str] = None
     responsible_username: Optional[str] = None
     items_count: int = 0
+    deleted_at: Optional[datetime] = None
+
+
+class PurgeTrashRequest(BaseModel):
+    """Пустой список или None — удалить все заявки в корзине."""
+
+    ids: Optional[list[int]] = None
 
 
 class UserUpsert(BaseModel):

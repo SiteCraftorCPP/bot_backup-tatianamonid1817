@@ -6,7 +6,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 
-from bot.api_client import get_orders, get_order, update_order, admin_telegram_ids_for_notify
+from bot.api_client import get_orders, get_order, update_order
 from bot.keyboards import main_menu_kb, orders_list_inline
 from config import get_settings
 
@@ -92,7 +92,7 @@ async def ylink_order_select(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Заявка не найдена.", show_alert=True)
         return
     await callback.message.edit_text(
-        f"Заявка №{order['number']}\n\nВставьте ссылку на папку Яндекс.Диск:"
+        f"Заявка № {order['number']}\n\nВставьте ссылку на папку Яндекс.Диск:"
     )
     await state.update_data(selected_order_id=order_id, selected_order_number=order["number"])
     await state.set_state("yandex_link:enter_url")
@@ -164,23 +164,23 @@ async def ylink_enter_url(message: Message, state: FSMContext):
         try:
             await message.bot.send_message(
                 chat_id=settings.work_chat_id_for_send,
-                text=f"Заявка №{order_number.split('-')[-1]} выполнена\n\nСсылка на файлы: {url}",
+                text=f"Заявка № {order_number} выполнена\n\nСсылка на файлы: {url}",
             )
         except Exception as e:
             logger.exception("Send to work chat failed: %s", e)
-    # Уведомление всем админам в личку
+    # Уведомление в личку только ответственному, который прикрепил ссылку (остальным админам — нет).
     who = f"@{message.from_user.username}" if message.from_user and message.from_user.username else (message.from_user.full_name or "пользователь") if message.from_user else "пользователь"
     admin_text = (
-        f"Ссылка добавлена к заявке №{order_number.split('-')[-1]}\n"
-        f"Добавил: {who}\n\n"
+        f"Ссылка добавлена к заявке № {order_number}\n"
+        f"Добавил: {who}\n"
         f"Ссылка: {url}\n\n"
         f"{status_phrase}"
     )
-    for admin_id in await admin_telegram_ids_for_notify():
+    if actor_id:
         try:
-            await message.bot.send_message(chat_id=admin_id, text=admin_text)
+            await message.bot.send_message(chat_id=actor_id, text=admin_text)
         except Exception as e:
-            logger.warning("Send link notification to admin %s failed: %s", admin_id, e)
+            logger.warning("Send link notification to responsible admin %s failed: %s", actor_id, e)
 
     # После добавления ссылки спрашиваем, отправлять ли заявку.
     # Важно: вопрос уместен только если ссылка реально есть.
@@ -273,6 +273,6 @@ async def ysend_yes(callback: CallbackQuery):
     await callback.answer("Отправлено.")
     uid = callback.from_user.id
     await callback.message.answer(
-        f"Заявка №{updated.get('number')} отправлена.",
+        f"Заявка № {updated.get('number')} отправлена.",
         reply_markup=main_menu_kb(is_admin=is_admin(uid)),
     )

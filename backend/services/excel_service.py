@@ -1,6 +1,8 @@
 """Excel file generation for orders."""
 import io
+import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -25,7 +27,7 @@ def generate_order_excel(
     
     # Header
     ws.merge_cells("A1:H1")
-    ws["A1"] = f"Заявка №{order_number}"
+    ws["A1"] = f"Заявка № {order_number}"
     ws["A1"].font = Font(bold=True, size=14)
     ws["A1"].alignment = Alignment(horizontal="center")
     
@@ -65,7 +67,33 @@ def generate_order_excel(
     return buf.getvalue()
 
 
-def get_excel_filename(order_number: str, created_at: datetime) -> str:
-    """Generate ASCII-only filename for HTTP headers."""
-    date_str = created_at.astimezone(TZ_UTC3).strftime("%Y-%m-%d_%H%M")
-    return f"order_{order_number}_{date_str}.xlsx"
+def _safe_download_filename_fragment(order_number: str) -> str:
+    """Фрагмент имени файла без символов, запрещённых в путях Windows."""
+    if not order_number:
+        return "order"
+    t = str(order_number).strip()
+    for bad in '<>:"/\\|?*\n\r\t':
+        t = t.replace(bad, "_")
+    t = re.sub(r"\s+", "_", t)
+    return t or "order"
+
+
+def get_order_excel_download_filename(order_number: str) -> str:
+    """Имя скачиваемого Excel по заявке (совпадает с номером в системе)."""
+    return f"Заявка_{_safe_download_filename_fragment(order_number)}.xlsx"
+
+
+def get_markznak_download_filename(order_number: str) -> str:
+    """Имя файла шаблона Маркзнак для заявки."""
+    return f"Заявка_{_safe_download_filename_fragment(order_number)}_markznak.xlsx"
+
+
+def content_disposition_attachment(filename: str) -> str:
+    """Заголовок Content-Disposition: кириллица через RFC 5987 (значение — только ASCII)."""
+    ascii_name = "".join(
+        c if 32 <= ord(c) < 127 and c not in '"\\' else "_"
+        for c in filename
+    )
+    ascii_name = re.sub(r"_+", "_", ascii_name).strip("_") or "download.xlsx"
+    utf8_part = quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{utf8_part}"

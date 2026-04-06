@@ -165,6 +165,13 @@ def target_gender_kb() -> ReplyKeyboardMarkup:
     )
 
 
+def repeat_template_choices_kb(choices: list[str]) -> ReplyKeyboardMarkup:
+    """Повторный товар: выбор из списка (юр. лицо / страна), по одной кнопке в ряд."""
+    rows = [[KeyboardButton(text=c)] for c in choices]
+    rows.append([KeyboardButton(text="« Назад")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
 def brands_kb(brands: list[str]) -> ReplyKeyboardMarkup:
     """Brand selection keyboard (for new products)."""
     rows: list[list[KeyboardButton]] = []
@@ -229,12 +236,17 @@ def orders_list_inline(
     filters_back_callback: str | None = None,
     filters_back_text: str = "« Категории",
     back_callback: str | None = None,
+    *,
+    trash_mode: bool = False,
+    trash_selected_ids: frozenset | set | None = None,
+    trash_toolbar: bool = False,
 ) -> InlineKeyboardMarkup:
     """Inline list of orders for selection.
     filter_mode:
-      - history: админ, история заявок — все 5 кнопок (все, создана, в работе, готово, отправлена)
+      - history: админ, история — все, создана, в работе, готово, отправлена, корзина
       - my_user: пользователь, мои заявки — все, создана, в работе, готова (готова=отправлена)
       - my_admin: админ, мои заявки — в работе, готово
+    trash_mode: в корзине — чекбокс у каждой заявки + панель массового удаления.
     """
     per_page = 8
     start = page * per_page
@@ -257,6 +269,7 @@ def orders_list_inline(
                 ("В работе", "в работе"),
                 ("Готово", "готово"),
                 ("Отправлена", "отправлена"),
+                ("Корзина", "trash"),
             ]
         elif filter_mode == "my_user":
             filter_btns = [
@@ -304,10 +317,34 @@ def orders_list_inline(
         # Визуальный отступ между списком админов и заявками.
         buttons.append([InlineKeyboardButton(text=" ", callback_data="admsep")])
 
-    buttons.extend([
-        [InlineKeyboardButton(text=f"№{num} — {status}", callback_data=f"{prefix}:{id_}")]
-        for id_, num, status in items
-    ])
+    if trash_mode and trash_selected_ids is not None:
+        for id_, num, status in items:
+            mark = "☑" if id_ in trash_selected_ids else "☐"
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"№ {num} — {status}",
+                        callback_data=f"{prefix}:{id_}",
+                    ),
+                    InlineKeyboardButton(text=mark, callback_data=f"trshsel:{id_}"),
+                ]
+            )
+        if trash_toolbar:
+            n = len(trash_selected_ids)
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"🗑 Удалить выбранные ({n})",
+                        callback_data="trshdel:sel",
+                    ),
+                    InlineKeyboardButton(text="🗑 Удалить всё", callback_data="trshdel:all"),
+                ]
+            )
+    else:
+        buttons.extend([
+            [InlineKeyboardButton(text=f"№ {num} — {status}", callback_data=f"{prefix}:{id_}")]
+            for id_, num, status in items
+        ])
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="◀ Назад", callback_data=f"{prefix}pg:{page-1}"))
@@ -334,48 +371,55 @@ def order_detail_back_kb(
     is_admin: bool = False,
     order_id: int | None = None,
     current_status: str | None = None,
-    can_user_delete: bool = False,
+    show_more_button: bool = True,
+    *,
+    in_trash: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Back from order detail.
+    """Клавиатура карточки заявки (как в ТЗ).
 
-    Если is_admin=True, добавляем:
-    - кнопки смены статуса (в работе, готово, отправлена)
-    - кнопку «Изменить ответственного».
+    Админ: статусы → ответственный → одна «Удалить заявку» → «Подробнее» → «Назад».
+    Для заявки в корзине: «Удалить навсегда», «Подробнее», «Назад».
+    Пользователь: только «Подробнее» и «Назад» (без второй кнопки удаления).
     """
     buttons = []
     if is_admin and order_id:
-        status_btns = [
-            ("В работе", "в работе", f"st:in_progress:{order_id}"),
-            ("Готово", "готово", f"st:ready:{order_id}"),
-            ("Отправлена", "отправлена", f"st:sent:{order_id}"),
-        ]
-        row = [InlineKeyboardButton(text=label, callback_data=cb) for label, _, cb in status_btns]
-        buttons.append(row)
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text="Изменить ответственного",
-                    callback_data=f"change_resp:{order_id}",
-                )
+        if in_trash:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text="🗑 Удалить навсегда",
+                        callback_data=f"purge1:{order_id}",
+                    )
+                ]
+            )
+        else:
+            status_btns = [
+                ("В работе", "в работе", f"st:in_progress:{order_id}"),
+                ("Готово", "готово", f"st:ready:{order_id}"),
+                ("Отправлена", "отправлена", f"st:sent:{order_id}"),
             ]
-        )
+            row = [InlineKeyboardButton(text=label, callback_data=cb) for label, _, cb in status_btns]
+            buttons.append(row)
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text="Изменить ответственного",
+                        callback_data=f"change_resp:{order_id}",
+                    )
+                ]
+            )
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text="🗑 Удалить заявку",
+                        callback_data=f"adel_confirm:{order_id}",
+                    )
+                ]
+            )
+
+    if order_id and show_more_button:
         buttons.append(
-            [
-                InlineKeyboardButton(
-                    text="🗑 Удалить заявку",
-                    callback_data=f"adel_confirm:{order_id}",
-                )
-            ]
-        )
-    elif (not is_admin) and order_id and can_user_delete:
-        # Для пользователя: кнопка удаления заявки
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text="🗑 Удалить заявку",
-                    callback_data=f"del_confirm:{order_id}",
-                )
-            ]
+            [InlineKeyboardButton(text="Подробнее", callback_data=f"ordmore:{order_id}")]
         )
 
     buttons.append([InlineKeyboardButton(text="« Назад", callback_data="orders_back")])

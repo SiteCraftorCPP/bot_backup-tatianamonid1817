@@ -7,6 +7,7 @@ from aiogram.types import (
     BufferedInputFile,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ReplyKeyboardMarkup,
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
@@ -24,31 +25,197 @@ from bot.keyboards import (
     brands_kb,
     country_kb,
     target_gender_kb,
+    repeat_template_choices_kb,
 )
 from bot.api_client import (
+    add_order_attachment,
     get_template_excel,
+    get_template_legal_entities,
+    get_template_countries,
     get_new_template_excel,
     create_order_from_template,
     delete_order,
     get_markznak_order_excel,
+    get_order,
     get_brands,
     get_user,
     upsert_user,
     admin_telegram_ids_for_notify,
+    set_order_comment,
+    register_order_telegram_posting,
 )
 from bot.notification_registry import notifications_registry
+from backend.services.excel_service import get_markznak_download_filename
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+def _repeat_country_display(db_country: str) -> str:
+    """Подпись кнопки страны для повторного товара (как в ТЗ)."""
+    c = (db_country or "").strip()
+    if not c:
+        return c
+    cl = c.casefold()
+    if cl == "кнр":
+        return "Китай (КНР)"
+    if cl in ("россия", "рф"):
+        return "Россия (РФ)"
+    if cl == "киргизия":
+        return "Киргизия"
+    return c
+
+
+def _build_repeat_country_keyboard(
+    countries_db: list[str],
+) -> tuple[ReplyKeyboardMarkup, dict[str, str]]:
+    """Текст кнопки -> значение country в БД для запроса шаблона."""
+    label_to_db: dict[str, str] = {}
+    taken: set[str] = set()
+    ordered_labels: list[str] = []
+    for c in countries_db:
+        base = _repeat_country_display(c)
+        candidate = base
+        if candidate in taken:
+            candidate = f"{base} — {c}"
+        n = 0
+        while candidate in taken:
+            n += 1
+            candidate = f"{c} ({n})"
+        taken.add(candidate)
+        label_to_db[candidate] = c
+        ordered_labels.append(candidate)
+    return repeat_template_choices_kb(ordered_labels), label_to_db
+
+
+async def _proceed_repeat_country_step(message: Message, state: FSMContext) -> None:
+    """После выбора (или авто) юр. лица — проверить страны и выдать шаблон или клавиатуру стран."""
+    data = await state.get_data()
+    article = data.get("article")
+    if not article:
+        await message.answer("Сессия сброшена. Начните запрос шаблона заново.")
+        await state.clear()
+        return
+    category = data.get("category")
+    le = data.get("repeat_legal_entity")
+    le_param = le.strip() if isinstance(le, str) and le.strip() else None
+    try:
+        countries = await get_template_countries(article, legal_entity=le_param)
+    except Exception as e:
+        logger.exception("Template countries fetch failed: %s", e)
+        await message.answer("Ошибка загрузки данных. Попробуйте позже.")
+        return
+    if len(countries) <= 1:
+        country_val = countries[0] if countries else None
+        await state.update_data(repeat_country=country_val)
+        await _send_repeat_template_excel(message, state)
+        return
+    kb, mapping = _build_repeat_country_keyboard(countries)
+    await state.update_data(repeat_country_label_to_db=mapping)
+    await message.answer("Выберите страну производства:", reply_markup=kb)
+    await state.set_state("template:repeat_country")
+
+
+async def _send_repeat_template_excel(message: Message, state: FSMContext) -> None:
+    """Скачать шаблон с учётом выбранных ЮЛ/страны и перейти к ожиданию файла."""
+    data = await state.get_data()
+    article = data.get("article")
+    if not article:
+        await message.answer("Сессия сброшена. Начните запрос шаблона заново.")
+        await state.clear()
+        return
+    category = data.get("category")
+    le = data.get("repeat_legal_entity")
+    co = data.get("repeat_country")
+    le_param = le.strip() if isinstance(le, str) and le.strip() else None
+    co_param = co.strip() if isinstance(co, str) and co.strip() else None
+    await message.answer("Готовлю шаблон…")
+    try:
+        excel_bytes = await get_template_excel(
+            article,
+            category=category,
+            legal_entity=le_param,
+            country=co_param,
+        )
+    except Exception as e:
+        logger.exception("Template fetch failed: %s", e)
+        if "404" in str(e) or "не найдены" in str(e).lower():
+            await message.answer("Товары по запросу не найдены.")
+        else:
+            await message.answer("Ошибка загрузки шаблона. Попробуйте позже.")
+        return
+    doc = BufferedInputFile(excel_bytes, filename=f"Шаблон_{article}.xlsx")
+    await message.answer_document(
+        doc,
+        caption=(
+            f"Шаблон по запросу «{article}».\n\n"
+            "Заполните колонку «Количество» и отправьте файл в чат."
+        ),
+    )
+    await state.update_data(
+        article=article,
+        ms_number=None,
+        comment=None,
+        repeat_legal_entity=None,
+        repeat_country=None,
+        repeat_legal_entity_options=None,
+        repeat_country_label_to_db=None,
+    )
+    await state.set_state("template:await_file")
+    await message.answer(
+        "Отправьте заполненный шаблон в чат или воспользуйтесь кнопками ниже.",
+        reply_markup=attach_file_kb(),
+    )
+
+
+def _template_flow_label(template_flow: str) -> str:
+    """Подпись в скобках: повторный / новый товар."""
+    return "новый товар" if template_flow == "new" else "повторный товар"
+
+
+async def _rollback_template_order_to_await_file(message: Message, state: FSMContext) -> None:
+    """Удалить только что созданную заявку и вернуться к отправке шаблона."""
+    user = message.from_user
+    if not user:
+        return
+
+    data = await state.get_data()
+    order_id = data.get("order_id")
+    author_id = data.get("author_id") or user.id
+
+    if order_id:
+        try:
+            await delete_order(order_id=order_id, requester_telegram_id=author_id)
+        except Exception:
+            pass
+
+    data.update(
+        order_id=None,
+        order_number=None,
+        order_items_count=None,
+        order_codes_total=None,
+        markznak_sent=False,
+        author_username=None,
+        author_full_name=None,
+        author_id=author_id,
+        comment=None,
+    )
+    await state.update_data(**data)
+    await state.set_state("template:await_file")
+    await message.answer(
+        "Отправьте заполненный шаблон в формате Excel (.xlsx).",
+        reply_markup=attach_file_kb(),
+    )
 
 
 async def _send_markznak_to_admins(
     message: Message,
     order_id: int,
     order_number: str,
-    items_count: int,
+    codes_total: int,
     comment: str | None = None,
     *,
+    template_flow: str = "repeat",
     author_username: str | None = None,
     author_full_name: str | None = None,
     author_id: int | None = None,
@@ -61,12 +228,16 @@ async def _send_markznak_to_admins(
         import os
 
         markznak_bytes = await get_markznak_order_excel(order_id)
+        order_payload = await get_order(order_id)
+        effective_comment = comment or (order_payload or {}).get("comment")
+        extras = (order_payload or {}).get("extra_attachments") or []
+
         with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
             f.write(markznak_bytes)
             tmp_path = f.name
         try:
             doc_out = FSInputFile(
-                tmp_path, filename=f"Заявка_{order_number}_markznak.xlsx"
+                tmp_path, filename=get_markznak_download_filename(order_number)
             )
 
             # Определяем автора: сначала из сохранённых данных, затем из message.from_user,
@@ -91,15 +262,18 @@ async def _send_markznak_to_admins(
             else:
                 author_line = None
 
+            flow_label = _template_flow_label(
+                template_flow if template_flow in ("new", "repeat") else "repeat"
+            )
             caption_lines = [
-                f"Новая заявка №{order_number.split('-')[-1]} (по шаблону)",
+                f"Новая заявка № {order_number} ({flow_label})",
             ]
             if author_line:
                 caption_lines.append(author_line)
-            caption_lines.append(f"Позиций: {items_count}")
-            if comment:
-                caption_lines.append(f"Комментарий: {comment}")
-            caption_lines.append("Расширенный файл МаркЗнак.")
+            caption_lines.append(f"Количество наклеек: {codes_total}")
+            caption_lines.append(
+                f"Комментарий: {effective_comment if effective_comment else '—'}"
+            )
             caption = "\n".join(caption_lines)
             markup = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -126,10 +300,38 @@ async def _send_markznak_to_admins(
                         is_document=True,
                         file_id=sent.document.file_id if sent.document else None,
                     )
+                    try:
+                        await register_order_telegram_posting(
+                            order_id, sent.chat.id, sent.message_id
+                        )
+                    except Exception as reg_err:
+                        logger.warning(
+                            "register_order_telegram_posting order=%s: %s",
+                            order_id,
+                            reg_err,
+                        )
                 except Exception as e:
                     logger.exception("Send markznak to admin %s failed: %s", admin_id, e)
         finally:
             os.unlink(tmp_path)
+
+        for att in extras:
+            fid = att.get("telegram_file_id")
+            if not fid:
+                continue
+            fn = att.get("file_name") or "файл"
+            extra_caption = f"Доп. файл к заявке № {order_number}: {fn}"
+            for admin_id in admin_ids:
+                try:
+                    await message.bot.send_document(
+                        chat_id=admin_id,
+                        document=fid,
+                        caption=extra_caption,
+                    )
+                except Exception as e:
+                    logger.exception(
+                        "Send extra attachment to admin %s failed: %s", admin_id, e
+                    )
     except Exception as e:
         logger.exception("Send markznak to admins failed: %s", e)
 
@@ -176,6 +378,7 @@ async def template_product_choice_back(message: Message, state: FSMContext):
 @router.message(StateFilter("template:product_choice"), F.text == "Повторный товар")
 async def template_repeat_product(message: Message, state: FSMContext):
     """Повторный: поиск по наименованию → шаблон → файл."""
+    await state.update_data(template_flow="repeat")
     await message.answer(
         "Введите артикул или часть наименования товара для поиска.\n"
         "Вы получите шаблон — заполните колонку «Количество» и отправьте файл обратно.",
@@ -187,6 +390,7 @@ async def template_repeat_product(message: Message, state: FSMContext):
 @router.message(StateFilter("template:product_choice"), F.text == "Новый товар")
 async def template_new_product(message: Message, state: FSMContext):
     """Новый: справочники (ЮЛ, бренд, страна, пол) → пустой шаблон → файл."""
+    await state.update_data(template_flow="new")
     await message.answer("Выберите юридическое лицо:", reply_markup=legal_entity_kb())
     await state.set_state("template:legal_entity")
 
@@ -323,36 +527,96 @@ async def template_article_back(message: Message, state: FSMContext):
 
 @router.message(StateFilter("template:article"), F.text)
 async def process_article_template(message: Message, state: FSMContext):
-    """Запрос шаблона по наименованию (поиск по столбцу «Наименование товаров»)."""
+    """Повторный товар: артикул/наименование → при необходимости ЮЛ и страна → шаблон."""
     article = message.text.strip()
     if len(article) < 2:
         await message.answer("Введите минимум 2 символа.")
         return
+    await state.update_data(
+        article=article,
+        repeat_legal_entity=None,
+        repeat_country=None,
+        repeat_legal_entity_options=None,
+        repeat_country_label_to_db=None,
+    )
     data = await state.get_data()
     category = data.get("category")
     try:
-        excel_bytes = await get_template_excel(article, category=category)
+        legal_entities = await get_template_legal_entities(article)
     except Exception as e:
-        logger.exception("Template fetch failed: %s", e)
+        logger.exception("Template legal entities fetch failed: %s", e)
         if "404" in str(e) or "не найдены" in str(e).lower():
-            await message.answer("Товары по этому запросу не найдены. Проверьте наименование.")
+            await message.answer("Товары по запросу не найдены.")
         else:
-            await message.answer("Ошибка загрузки шаблона. Попробуйте позже.")
+            await message.answer("Ошибка загрузки данных. Попробуйте позже.")
         return
-    doc = BufferedInputFile(excel_bytes, filename=f"Шаблон_{article}.xlsx")
-    await message.answer_document(
-        doc,
-        caption=(
-            f"Шаблон по запросу «{article}».\n\n"
-            "Заполните колонку «Количество» и отправьте файл в чат."
-        ),
-    )
-    await state.update_data(article=article, ms_number=None, comment=None)
-    await state.set_state("template:await_file")
+    if len(legal_entities) <= 1:
+        le = legal_entities[0] if legal_entities else None
+        await state.update_data(repeat_legal_entity=le)
+        await _proceed_repeat_country_step(message, state)
+        return
+    await state.update_data(repeat_legal_entity_options=legal_entities)
     await message.answer(
-        "Отправьте заполненный шаблон в чат или воспользуйтесь кнопками ниже.",
-        reply_markup=attach_file_kb(),
+        "Найдено несколько юридических лиц. Выберите нужное:",
+        reply_markup=repeat_template_choices_kb(legal_entities),
     )
+    await state.set_state("template:repeat_legal_entity")
+
+
+@router.message(StateFilter("template:repeat_legal_entity"), F.text == "« Назад")
+async def template_repeat_legal_entity_back(message: Message, state: FSMContext):
+    await state.update_data(repeat_legal_entity_options=None)
+    await message.answer(
+        "Введите артикул или часть наименования товара для поиска.\n"
+        "Вы получите шаблон — заполните колонку «Количество» и отправьте файл обратно.",
+        reply_markup=back_kb(),
+    )
+    await state.set_state("template:article")
+
+
+@router.message(StateFilter("template:repeat_legal_entity"), F.text)
+async def template_repeat_legal_entity_pick(message: Message, state: FSMContext):
+    choice = (message.text or "").strip()
+    data = await state.get_data()
+    options = data.get("repeat_legal_entity_options") or []
+    if choice not in options:
+        await message.answer("Выберите юридическое лицо с клавиатуры ниже.")
+        return
+    await state.update_data(repeat_legal_entity=choice)
+    await _proceed_repeat_country_step(message, state)
+
+
+@router.message(StateFilter("template:repeat_country"), F.text == "« Назад")
+async def template_repeat_country_back(message: Message, state: FSMContext):
+    data = await state.get_data()
+    options = data.get("repeat_legal_entity_options") or []
+    await state.update_data(repeat_country_label_to_db=None)
+    if len(options) > 1:
+        await message.answer(
+            "Найдено несколько юридических лиц. Выберите нужное:",
+            reply_markup=repeat_template_choices_kb(options),
+        )
+        await state.set_state("template:repeat_legal_entity")
+        return
+    await message.answer(
+        "Введите артикул или часть наименования товара для поиска.\n"
+        "Вы получите шаблон — заполните колонку «Количество» и отправьте файл обратно.",
+        reply_markup=back_kb(),
+    )
+    await state.set_state("template:article")
+
+
+@router.message(StateFilter("template:repeat_country"), F.text)
+async def template_repeat_country_pick(message: Message, state: FSMContext):
+    data = await state.get_data()
+    mapping = data.get("repeat_country_label_to_db") or {}
+    label = (message.text or "").strip()
+    db_country = mapping.get(label)
+    if db_country is None:
+        await message.answer("Выберите страну с клавиатуры ниже.")
+        return
+    await state.update_data(repeat_country=db_country)
+    await _send_repeat_template_excel(message, state)
 
 
 # --- Комментарий к заявке (общий для нового/повторного товара по шаблону) ---
@@ -384,6 +648,7 @@ async def template_file_back(message: Message, state: FSMContext):
         "order_id",
         "order_number",
         "order_items_count",
+        "order_codes_total",
         "markznak_sent",
         "author_username",
         "author_full_name",
@@ -514,19 +779,59 @@ async def process_template_file(message: Message, state: FSMContext):
         return
 
     # Предлагаем прикрепить доп. файл (любой формат)
+    codes_total = sum(int(i.get("quantity") or 0) for i in (order.get("items") or []))
+    tf = data.get("template_flow")
+    if not tf:
+        tf = "repeat" if data.get("article") else "new"
     await state.update_data(
         order_id=order["id"],
         order_number=order["number"],
         order_items_count=len(order.get("items", [])),
+        order_codes_total=codes_total,
+        template_flow=tf,
         markznak_sent=False,
         author_username=user.username,
         author_full_name=user.full_name,
         author_id=user.id,
     )
-    await state.set_state("template:await_extra_file")
-    from bot.handlers.main_menu import is_admin
+    await state.set_state("template:order_comment")
     await message.answer(
-        f"Заявка №{order['number']} создана. Позиций: {len(order.get('items', []))}.\n\n"
+        f"Заявка № {order['number']} создана. Количество наклеек: {codes_total}.\n\n"
+        "Введите комментарий к заявке или нажмите «Пропустить».",
+        reply_markup=final_comment_kb(),
+    )
+
+
+# --- Комментарий сразу после создания заявки ---
+@router.message(StateFilter("template:order_comment"), F.text == "« Назад")
+async def template_order_comment_back(message: Message, state: FSMContext):
+    await _rollback_template_order_to_await_file(message, state)
+
+
+@router.message(StateFilter("template:order_comment"), F.text == "⏭ Пропустить")
+async def template_order_comment_skip(message: Message, state: FSMContext):
+    await state.update_data(comment=None)
+    await state.set_state("template:await_extra_file")
+    await message.answer(
+        "Хотите прикрепить дополнительный файл? (любой формат)",
+        reply_markup=done_extra_kb(),
+    )
+
+
+@router.message(StateFilter("template:order_comment"), F.text)
+async def template_order_comment_set(message: Message, state: FSMContext):
+    text = message.text.strip()
+    await state.update_data(comment=text)
+    data = await state.get_data()
+    oid = data.get("order_id")
+    if oid:
+        try:
+            await set_order_comment(int(oid), text)
+        except Exception as e:
+            logger.exception("set_order_comment failed: %s", e)
+    await state.set_state("template:await_extra_file")
+    await message.answer(
+        "Комментарий сохранён.\n\n"
         "Хотите прикрепить дополнительный файл? (любой формат)",
         reply_markup=done_extra_kb(),
     )
@@ -535,40 +840,7 @@ async def process_template_file(message: Message, state: FSMContext):
 # --- Доп. файл после создания заявки ---
 @router.message(StateFilter("template:await_extra_file"), F.text == "« Назад")
 async def template_extra_back(message: Message, state: FSMContext):
-    # Шаг назад: вернуться к загрузке заполненного шаблона.
-    # Заявка уже создана в backend, поэтому удаляем её, чтобы следующий upload не плодил дубликаты.
-    user = message.from_user
-    if not user:
-        return
-
-    data = await state.get_data()
-    order_id = data.get("order_id")
-    author_id = data.get("author_id") or user.id
-
-    if order_id:
-        try:
-            await delete_order(order_id=order_id, requester_telegram_id=author_id)
-        except Exception:
-            pass
-
-    # Удаляем только данные по созданной заявке, а выбор шаблона оставляем.
-    data.update(
-        order_id=None,
-        order_number=None,
-        order_items_count=None,
-        markznak_sent=False,
-        author_username=None,
-        author_full_name=None,
-        author_id=author_id,
-        comment=None,
-    )
-    await state.update_data(**data)
-    await state.set_state("template:await_file")
-    await message.answer(
-        "Отправьте заполненный шаблон в формате Excel (.xlsx).",
-        reply_markup=attach_file_kb(),
-    )
-    return
+    await _rollback_template_order_to_await_file(message, state)
 
 
 @router.message(StateFilter("template:await_extra_file"), F.text == "✅ Готово")
@@ -580,10 +852,10 @@ async def template_extra_done(message: Message, state: FSMContext):
     markznak_sent = data.get("markznak_sent")
 
     if order_id and order_number and not markznak_sent:
-        await state.set_state("template:final_comment")
+        await state.set_state("template:final_approval")
         await message.answer(
-            "Введите комментарий к заявке или нажмите «Пропустить».",
-            reply_markup=final_comment_kb(),
+            "Заявка может быть оформлена?",
+            reply_markup=final_approval_kb(),
         )
         return
 
@@ -591,8 +863,7 @@ async def template_extra_done(message: Message, state: FSMContext):
     from bot.handlers.main_menu import is_admin as _is_admin
     uid = message.from_user.id if message.from_user else 0
     is_adm = await _is_admin(uid)
-    text = f"Заявка №{order_number} оформлена." if order_number else "Готово."
-    await message.answer(text, reply_markup=main_menu_kb(is_admin=is_adm))
+    await message.answer("Готово.", reply_markup=main_menu_kb(is_admin=is_adm))
     return
 
 
@@ -609,12 +880,17 @@ async def _finalize_order_with_comment(message: Message, state: FSMContext) -> N
     markznak_sent = data.get("markznak_sent")
 
     if order_id and order_number and not markznak_sent:
+        codes_total = int(data.get("order_codes_total") or items_count or 0)
+        tf = data.get("template_flow")
+        if tf not in ("new", "repeat"):
+            tf = "repeat" if data.get("article") else "new"
         await _send_markznak_to_admins(
             message=message,
             order_id=order_id,
             order_number=order_number,
-            items_count=items_count,
+            codes_total=codes_total,
             comment=data.get("comment"),
+            template_flow=tf,
             author_username=data.get("author_username"),
             author_full_name=data.get("author_full_name"),
             author_id=data.get("author_id"),
@@ -625,13 +901,23 @@ async def _finalize_order_with_comment(message: Message, state: FSMContext) -> N
     from bot.handlers.main_menu import is_admin as _is_admin
     uid = message.from_user.id if message.from_user else 0
     is_adm = await _is_admin(uid)
-    text = f"Заявка №{order_number} оформлена." if order_number else "Готово."
-    await message.answer(text, reply_markup=main_menu_kb(is_admin=is_adm))
+    await message.answer("Готово.", reply_markup=main_menu_kb(is_admin=is_adm))
+
+
+@router.callback_query(StateFilter("template:order_comment"), F.data == "tmpl_final_skip_comment")
+async def template_order_comment_skip_cb(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(comment=None)
+    await state.set_state("template:await_extra_file")
+    await callback.message.answer(
+        "Хотите прикрепить дополнительный файл? (любой формат)",
+        reply_markup=done_extra_kb(),
+    )
+    await callback.answer()
 
 
 @router.callback_query(StateFilter("template:final_comment"), F.data == "tmpl_final_skip_comment")
 async def template_final_comment_skip(callback: CallbackQuery, state: FSMContext):
-    # Совместимость: обработка старых inline-кнопок "Пропустить".
+    # Совместимость: старые сессии после шага доп. файла.
     await state.update_data(comment=None)
     await state.set_state("template:final_approval")
     await callback.message.answer(
@@ -676,10 +962,10 @@ async def template_final_comment_set(message: Message, state: FSMContext):
 
 @router.message(StateFilter("template:final_approval"), F.text == "« Назад")
 async def template_final_approval_back(message: Message, state: FSMContext):
-    await state.set_state("template:final_comment")
+    await state.set_state("template:await_extra_file")
     await message.answer(
-        "Введите комментарий к заявке или нажмите «Пропустить».",
-        reply_markup=final_comment_kb(),
+        "Вы можете прикрепить дополнительный файл или нажать «Готово».",
+        reply_markup=done_extra_kb(),
     )
 
 
@@ -700,38 +986,47 @@ async def template_final_approval_no(message: Message, state: FSMContext):
 
 @router.message(StateFilter("template:await_extra_file"), F.document)
 async def process_extra_file(message: Message, state: FSMContext):
-    """Приём доп. файла — пересылаем админам с подписью о заявке."""
+    """Приём доп. файла — только в БД; админам файл уйдёт вместе с основным Excel после «Готово»."""
     doc = message.document
-    file = await message.bot.get_file(doc.file_id)
-    bytes_io = await message.bot.download_file(file.file_path)
-    file_bytes = bytes_io.read()
+    if not doc:
+        return
     user = message.from_user
     if not user:
         return
 
     data = await state.get_data()
-    order_number = data.get("order_number", "")
     order_id = data.get("order_id")
-    items_count = data.get("order_items_count") or 0
-    who = f"@{user.username}" if user.username else (user.full_name or "пользователь")
 
-    caption = (
-        f"Доп. файл к заявке №{order_number.split('-')[-1]}\n"
-        f"От: {who}\n"
-        f"Файл: {doc.file_name or 'файл'}"
-    )
-    user_doc = BufferedInputFile(file_bytes, filename=doc.file_name or "файл")
-    for admin_id in await admin_telegram_ids_for_notify():
+    attached_to_order = False
+    if order_id:
         try:
-            await message.bot.send_document(
-                chat_id=admin_id,
-                document=user_doc,
-                caption=caption,
+            await add_order_attachment(
+                int(order_id),
+                author_telegram_id=user.id,
+                telegram_file_id=doc.file_id,
+                file_name=doc.file_name,
             )
+            attached_to_order = True
         except Exception as e:
-            logger.exception("Send extra file to admin %s failed: %s", admin_id, e)
+            logger.exception("Register order attachment failed: %s", e)
+    else:
+        logger.warning("Extra file: no order_id in FSM, file not linked to order")
 
-    await message.answer(
-        "Файл отправлен админам. Прикрепить ещё или нажмите «Готово».",
-        reply_markup=done_extra_kb(),
-    )
+    if attached_to_order:
+        user_reply = (
+            "Файл сохранён в заявке.\n\n"
+            "Прикрепить ещё один файл или нажмите «Готово»."
+        )
+    elif order_id:
+        user_reply = (
+            "Не удалось привязать файл к заявке на сервере. "
+            "Попробуйте отправить файл ещё раз; если снова не получится — напишите администратору.\n\n"
+            "Прикрепить ещё или нажмите «Готово»."
+        )
+    else:
+        user_reply = (
+            "Заявка в сессии не найдена — файл не сохранён. Начните оформление заявки заново.\n\n"
+            "Прикрепить ещё или нажмите «Готово»."
+        )
+
+    await message.answer(user_reply, reply_markup=done_extra_kb())

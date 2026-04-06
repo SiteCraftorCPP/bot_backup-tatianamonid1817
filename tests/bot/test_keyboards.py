@@ -21,26 +21,34 @@ def test_skip_inline_kb_text():
     assert btn.callback_data == "skip_test"
 
 
-def test_order_detail_back_kb_hides_current_status_in_progress():
+def test_order_detail_back_kb_admin_has_all_status_buttons():
     kb = order_detail_back_kb(is_admin=True, order_id=123, current_status="в работе")
     texts = _status_button_texts(kb)
-    # Only \"Готово\" and \"Отправлена\" should be present
-    assert "В работе" not in texts
-    assert "Готово" in texts
-    assert "Отправлена" in texts
-
-
-def test_order_detail_back_kb_shows_only_subsequent_when_ready():
-    """При статусе «готово» показываем только последующий статус «Отправлена», без возврата назад."""
-    kb = order_detail_back_kb(is_admin=True, order_id=123, current_status="готово")
-    texts = _status_button_texts(kb)
-    assert "Готово" not in texts
-    assert "В работе" not in texts  # возврат назад запрещён
-    assert "Отправлена" in texts
-
-
-def test_order_detail_back_kb_shows_all_when_created():
-    kb = order_detail_back_kb(is_admin=True, order_id=123, current_status="создана")
-    texts = _status_button_texts(kb)
-    # All three admin status buttons should be available
     assert set(texts) == {"В работе", "Готово", "Отправлена"}
+
+
+def test_order_detail_back_kb_has_more_button_under_delete():
+    kb = order_detail_back_kb(is_admin=True, order_id=123, current_status="готово")
+    flat = [btn for row in kb.inline_keyboard for btn in row]
+    more = [b for b in flat if b.callback_data and b.callback_data.startswith("ordmore:")]
+    assert len(more) == 1
+    assert more[0].text == "Подробнее"
+    delete_idx = next(i for i, b in enumerate(flat) if b.callback_data and "adel_confirm" in b.callback_data)
+    more_idx = next(i for i, b in enumerate(flat) if b.callback_data and b.callback_data.startswith("ordmore:"))
+    back_idx = next(i for i, b in enumerate(flat) if b.text == "« Назад")
+    assert delete_idx < more_idx < back_idx
+
+
+def test_order_detail_back_kb_user_sees_more_without_admin_row():
+    kb = order_detail_back_kb(is_admin=False, order_id=55)
+    flat = [btn for row in kb.inline_keyboard for btn in row]
+    assert not any(b.callback_data and b.callback_data.startswith("st:") for b in flat)
+    assert any(b.callback_data == "ordmore:55" for b in flat)
+
+
+def test_order_detail_back_kb_trash_shows_purge_only():
+    kb = order_detail_back_kb(is_admin=True, order_id=99, in_trash=True)
+    flat = [btn for row in kb.inline_keyboard for btn in row]
+    assert not any(b.callback_data and b.callback_data.startswith("st:") for b in flat)
+    assert any(b.callback_data == "purge1:99" for b in flat)
+    assert any(b.callback_data == "ordmore:99" for b in flat)

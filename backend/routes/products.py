@@ -1,5 +1,5 @@
 """Products API routes."""
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import select, or_, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +12,7 @@ from backend.services.template_service import generate_user_template_excel
 router = APIRouter()
 
 def _normalize_category(category: str | None) -> str | None:
-    """Нормализовать категорию бота в product_type ('clothing'|'shoes')."""
+    """Нормализовать категорию бота в режим шаблона Excel (только макет колонок)."""
     if not category:
         return None
     c = category.strip().lower()
@@ -20,8 +20,34 @@ def _normalize_category(category: str | None) -> str | None:
         return "shoes"
     if "одеж" in c or "cloth" in c:
         return "clothing"
-    # Неизвестное значение — не фильтруем
     return None
+
+
+_REPEAT_TEMPLATE_NOT_FOUND = "Товары по запросу не найдены"
+
+
+def _repeat_article_search_filters(article: str) -> list:
+    """Повторный товар по ТЗ: шаги ЮЛ и стран — только по совпадению артикула/наименования (без одежда/обувь)."""
+    q = f"%{article.strip()}%"
+    return [
+        Product.is_active.is_(True),
+        or_(
+            Product.name.ilike(q),
+            Product.variant.ilike(q),
+            Product.article.ilike(q),
+        ),
+    ]
+
+
+async def _require_products_for_repeat(
+    db: AsyncSession,
+    filters: list,
+    *,
+    not_found_detail: str,
+) -> None:
+    check = await db.execute(select(Product.id).where(*filters).limit(1))
+    if check.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail=not_found_detail)
 
 
 @router.get("/brands", response_model=list[str])
@@ -64,63 +90,113 @@ async def get_brands(
     return [b for (b,) in rows_all if b]
 
 
+@router.get("/template/legal_entities", response_model=list[str])
+async def get_template_legal_entities(
+    article: str = Query(..., min_length=2),
+    db: AsyncSession = Depends(get_db),
+):
+    """Список юридических лиц по артикулу/наименованию (шаг 2 по ТЗ, без фильтра одежда/обувь)."""
+    base_filters = _repeat_article_search_filters(article)
+    await _require_products_for_repeat(
+        db,
+        base_filters,
+        not_found_detail=_REPEAT_TEMPLATE_NOT_FOUND,
+    )
+
+    le_nonempty = and_(
+        Product.legal_entity.is_not(None),
+        func.length(func.trim(Product.legal_entity)) > 0,
+    )
+    # distinct по trim(ЮЛ), иначе в БД «Малец» и «Малец » дают два ЮЛ, а выбор не совпадает с фильтром.
+    le_trim = func.trim(Product.legal_entity)
+    stmt = (
+        select(le_trim)
+        .where(*base_filters, le_nonempty)
+        .distinct()
+        .order_by(le_trim)
+    )
+    result = await db.execute(stmt)
+    rows = [r for (r,) in result.all() if r and str(r).strip()]
+    # Уникальные значения с устойчивым порядком
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in rows:
+        s = str(r).strip()
+        key = s.casefold()
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
+
+
+@router.get("/template/countries", response_model=list[str])
+async def get_template_countries(
+    article: str = Query(..., min_length=2),
+    legal_entity: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Список стран по артикулу и выбранному ЮЛ (шаг 3 по ТЗ, без фильтра одежда/обувь)."""
+    base_filters = _repeat_article_search_filters(article)
+    filters = list(base_filters)
+    le_trim = func.trim(Product.legal_entity)
+    if legal_entity and legal_entity.strip():
+        filters.append(le_trim == legal_entity.strip())
+
+    await _require_products_for_repeat(
+        db,
+        filters,
+        not_found_detail=_REPEAT_TEMPLATE_NOT_FOUND,
+    )
+
+    c_nonempty = and_(
+        Product.country.is_not(None),
+        func.length(func.trim(Product.country)) > 0,
+    )
+    co_trim = func.trim(Product.country)
+    stmt = (
+        select(co_trim)
+        .where(*filters, c_nonempty)
+        .distinct()
+        .order_by(co_trim)
+    )
+    result = await db.execute(stmt)
+    rows = [r for (r,) in result.all() if r and str(r).strip()]
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in rows:
+        s = str(r).strip()
+        key = s.casefold()
+        if key not in seen:
+            seen.add(key)
+            out.append(s)
+    return out
+
+
 @router.get("/template")
 async def get_template_by_article(
     article: str = Query(..., min_length=2),
     category: str | None = Query(None),
+    legal_entity: str | None = Query(None),
+    country: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Сгенерировать пользовательский шаблон Excel по запросу.
-
-    Поиск только по столбцу «Наименование товаров» (name, variant),
-    не по артикулу.
+    Шаблон Excel: те же отборы по артикулу + ЮЛ + страна, что и после шагов ТЗ.
+    Параметр category задаёт только макет колонок (одежда/обувь), не состав строк справочника.
     """
-    q = f"%{article.strip()}%"
-    mode = _normalize_category(category)
+    filters = list(_repeat_article_search_filters(article))
+    if legal_entity and legal_entity.strip():
+        filters.append(func.trim(Product.legal_entity) == legal_entity.strip())
+    if country and country.strip():
+        filters.append(func.trim(Product.country) == country.strip())
 
-    # Бизнес-правило: если пользователь выбрал "Одежда" — ищем только одежду,
-    # если "Обувь" — только обувь. Чтобы не ломать старые данные, где product_type
-    # может быть пустым, используем запасной признак обуви по ТН ВЭД (64*).
-    base_filters = [
-        Product.is_active.is_(True),
-        or_(
-            Product.name.ilike(q),
-            Product.variant.ilike(q),
-            Product.article.ilike(q),
-        ),
-    ]
-    if mode == "shoes":
-        base_filters.append(
-            or_(
-                Product.product_type == "shoes",
-                and_(Product.product_type.is_(None), Product.tnved_code.ilike("64%")),
-            )
-        )
-    elif mode == "clothing":
-        base_filters.append(
-            or_(
-                Product.product_type == "clothing",
-                and_(
-                    Product.product_type.is_(None),
-                    or_(Product.tnved_code.is_(None), Product.tnved_code.is_not(None) & ~Product.tnved_code.ilike("64%")),
-                ),
-            )
-        )
-
-    stmt = select(Product).where(*base_filters)
+    stmt = select(Product).where(*filters)
 
     stmt = stmt.order_by(Product.article, Product.size).limit(500)
     result = await db.execute(stmt)
     products = result.scalars().all()
     if not products:
-        from fastapi import HTTPException
-
-        if mode == "shoes":
-            raise HTTPException(status_code=404, detail="Товары по запросу не найдены в категории «Обувь»")
-        if mode == "clothing":
-            raise HTTPException(status_code=404, detail="Товары по запросу не найдены в категории «Одежда»")
-        raise HTTPException(status_code=404, detail="Товары по запросу не найдены")
+        raise HTTPException(status_code=404, detail=_REPEAT_TEMPLATE_NOT_FOUND)
     rows = [ProductResponse.model_validate(p).model_dump() for p in products]
     excel_bytes = generate_user_template_excel(
         rows,
@@ -218,6 +294,5 @@ async def get_product(
     result = await db.execute(stmt)
     product = result.scalar_one_or_none()
     if not product:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Product not found")
     return ProductResponse.model_validate(product)

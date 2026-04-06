@@ -1,16 +1,48 @@
 """Orders API routes."""
+import logging
 from datetime import datetime
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from config import get_settings
 from database.session import get_db
-from database.models import Order, OrderItem, User, Product
-from backend.schemas import OrderCreate, OrderResponse, OrderUpdate, OrderListResponse, OrderItemResponse, OrderItemCreate
-from backend.services.order_service import generate_order_number, get_or_create_user
-from backend.services.excel_service import generate_order_excel, get_excel_filename
+from database.models import (
+    Order,
+    OrderAttachment,
+    OrderItem,
+    OrderTelegramPosting,
+    User,
+    Product,
+    TZ_UTC3,
+)
+from backend.schemas import (
+    OrderAttachmentCreate,
+    OrderAttachmentResponse,
+    OrderCreate,
+    OrderItemCreate,
+    OrderItemResponse,
+    OrderListResponse,
+    OrderResponse,
+    OrderTelegramPostingCreate,
+    OrderTelegramPostingResponse,
+    OrderUpdate,
+    PurgeTrashRequest,
+)
+from backend.services.order_service import (
+    assign_public_order_number,
+    generate_order_number,
+    get_or_create_user,
+)
+from backend.services.excel_service import (
+    content_disposition_attachment,
+    generate_order_excel,
+    get_markznak_download_filename,
+    get_order_excel_download_filename,
+)
 from backend.services.template_service import (
     parse_user_template_excel,
     generate_markznak_template_excel,
@@ -19,6 +51,55 @@ from backend.services.google_sheets_service import sheets_service
 from backend.services.audit_service import log_action
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _clip_str(value: str | None, max_len: int) -> str | None:
+    """Обрезка строки под VARCHAR в БД (иначе PostgreSQL даёт DataError → 500)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    return s[:max_len] if len(s) > max_len else s
+
+
+def _order_item_create_from_template_row(
+    r: dict,
+    product: Product | None,
+) -> OrderItemCreate:
+    """Собрать позицию с учётом лимитов полей order_items."""
+    qty = int(r["quantity"])
+    if product:
+        sz = product.size or _clip_str(r.get("size"), 20) or ""
+        return OrderItemCreate(product_id=product.id, size=sz, quantity=qty)
+    return OrderItemCreate(
+        size=_clip_str(r.get("size"), 20) or "",
+        quantity=qty,
+        article=_clip_str(r.get("article"), 100),
+        name=_clip_str(r.get("name"), 500) or _clip_str(r.get("article"), 100) or "",
+        tnved_code=_clip_str(r.get("tnved_code"), 50),
+        color=_clip_str(r.get("color"), 100),
+        composition=_clip_str(r.get("composition"), 500),
+        legal_entity=_clip_str(r.get("legal_entity"), 200),
+        brand=_clip_str(r.get("brand"), 200),
+        country=_clip_str(r.get("country"), 200),
+        target_gender=_clip_str(r.get("target_gender"), 50),
+        category=_clip_str(r.get("item_type"), 100),
+    )
+
+
+def _require_admin_telegram(telegram_id: int | None) -> None:
+    if telegram_id is None:
+        raise HTTPException(status_code=403, detail="Admin only")
+    if int(telegram_id) not in get_settings().admin_ids_list:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+
+def _extra_attachments_payload(order: Order) -> list[OrderAttachmentResponse]:
+    rows = list(order.attachments or [])
+    rows.sort(key=lambda a: (a.created_at, a.id))
+    return [OrderAttachmentResponse.model_validate(a) for a in rows]
 
 
 @router.post("/", response_model=OrderResponse)
@@ -80,6 +161,8 @@ async def create_order(
         db.add(item)
     
     await db.flush()
+    await assign_public_order_number(db, order)
+    await db.flush()
     await db.refresh(order)
     
     # Add to Google Sheets registry (use data.items — order.items lazy load fails in async)
@@ -95,18 +178,25 @@ async def create_order(
         entity_id=order.id,
         details=f"number={order.number}",
     )
-    sheets_service.append_order_to_registry(
-        order_number=order.number,
-        created_at=order.created_at.strftime("%d.%m.%Y %H:%M"),
-        author=author_str,
-        items_summary=items_summary[:500],
-        status=order.status,
-        author_telegram_id=data.author_telegram_id,
-        author_username=data.author_username,
-    )
+    try:
+        sheets_service.append_order_to_registry(
+            order_number=order.number,
+            created_at=order.created_at.strftime("%d.%m.%Y %H:%M"),
+            author=author_str,
+            items_summary=items_summary[:500],
+            status=order.status,
+            author_telegram_id=data.author_telegram_id,
+            author_username=data.author_username,
+        )
+    except Exception:
+        logger.exception("append_order_to_registry failed (заявка уже создана)")
 
     # Eager-load items (async session doesn't support lazy load)
-    stmt = select(Order).where(Order.id == order.id).options(selectinload(Order.items))
+    stmt = (
+        select(Order)
+        .where(Order.id == order.id)
+        .options(selectinload(Order.items), selectinload(Order.attachments))
+    )
     result = await db.execute(stmt)
     order = result.scalar_one()
 
@@ -114,13 +204,21 @@ async def create_order(
         id=order.id,
         number=order.number,
         author_id=order.author_id,
+        author_telegram_id=user.telegram_id,
+        author_username=user.username,
+        author_full_name=user.full_name,
         status=order.status,
         order_type=order.order_type,
         ms_order_number=order.ms_order_number,
         comment=order.comment,
         yandex_link=order.yandex_link,
+        responsible_telegram_id=order.responsible_telegram_id,
+        responsible_username=order.responsible_username,
         created_at=order.created_at,
+        updated_at=order.updated_at,
+        deleted_at=order.deleted_at,
         items=[OrderItemResponse.model_validate(i) for i in order.items],
+        extra_attachments=_extra_attachments_payload(order),
     )
 
 
@@ -155,12 +253,14 @@ async def delete_order(
             status_code=400,
             detail="ORDER_NOT_DELETABLE",
         )
+    if order.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Order not found")
 
     number = order.number
     author_username = user.username
     author_telegram_id = user.telegram_id
 
-    await db.delete(order)
+    order.deleted_at = datetime.now(TZ_UTC3)
     await log_action(
         db,
         telegram_id=requester_telegram_id,
@@ -207,7 +307,10 @@ async def admin_delete_order(
     author_username = user.username
     author_telegram_id = user.telegram_id
 
-    await db.delete(order)
+    if order.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    order.deleted_at = datetime.now(TZ_UTC3)
     await log_action(
         db,
         telegram_id=requester_telegram_id,
@@ -224,6 +327,70 @@ async def admin_delete_order(
         "author_telegram_id": author_telegram_id,
         "author_username": author_username,
     }
+
+
+@router.post("/trash/purge")
+async def purge_trash_orders(
+    data: PurgeTrashRequest,
+    requester_telegram_id: int = Query(..., description="Telegram id администратора"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Окончательно удалить заявки из корзины (только с заполненным deleted_at)."""
+    _require_admin_telegram(requester_telegram_id)
+    if data.ids:
+        stmt = select(Order).where(
+            Order.id.in_(data.ids),
+            Order.deleted_at.isnot(None),
+        )
+    else:
+        stmt = select(Order).where(Order.deleted_at.isnot(None))
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    purged_numbers = [o.number for o in rows]
+    for o in rows:
+        await db.delete(o)
+    await log_action(
+        db,
+        telegram_id=requester_telegram_id,
+        action="trash_purged",
+        entity_type="order",
+        entity_id=0,
+        details=f"count={len(rows)} numbers={purged_numbers[:20]}",
+    )
+    await db.flush()
+    return {"purged": len(rows), "numbers": purged_numbers}
+
+
+@router.delete("/{order_id}/purge")
+async def purge_single_trashed_order(
+    order_id: int,
+    requester_telegram_id: int = Query(..., description="Telegram id администратора"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Окончательно удалить одну заявку из корзины."""
+    _require_admin_telegram(requester_telegram_id)
+    stmt = select(Order).where(Order.id == order_id)
+    result = await db.execute(stmt)
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.deleted_at is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Order is not in trash (soft-delete first)",
+        )
+    number = order.number
+    await db.delete(order)
+    await log_action(
+        db,
+        telegram_id=requester_telegram_id,
+        action="order_purged_from_trash",
+        entity_type="order",
+        entity_id=order_id,
+        details=f"number={number}",
+    )
+    await db.flush()
+    return {"id": order_id, "number": number}
 
 
 @router.post("/from_template", response_model=OrderResponse)
@@ -262,12 +429,8 @@ async def create_order_from_template(
             strict_filters.append(Product.article == r["article"])
         if r.get("legal_entity"):
             legal_entity_val = str(r["legal_entity"]).strip()
-            strict_filters.append(
-                or_(
-                    Product.legal_entity == legal_entity_val,
-                    func.lower(Product.legal_entity) == legal_entity_val.lower(),
-                )
-            )
+            # trim(ЮЛ) как в /products/template — иначе строки с пробелами в справочнике не матчятся.
+            strict_filters.append(func.trim(Product.legal_entity) == legal_entity_val)
         if r.get("brand"):
             brand_val = str(r["brand"]).strip()
             strict_filters.append(
@@ -305,42 +468,33 @@ async def create_order_from_template(
             if len(candidates) == 1:
                 product = candidates[0]
 
-        if product:
-            items.append(
-                OrderItemCreate(
-                    product_id=product.id,
-                    size=r["size"],
-                    quantity=r["quantity"],
-                )
-            )
-        else:
-            items.append(
-                OrderItemCreate(
-                    size=r["size"],
-                    quantity=r["quantity"],
-                    article=r["article"],
-                    name=r.get("name") or r["article"],
-                    tnved_code=r.get("tnved_code"),
-                    color=r.get("color"),
-                    composition=r.get("composition"),
-                    legal_entity=r.get("legal_entity"),
-                    brand=r.get("brand"),
-                    country=r.get("country"),
-                    target_gender=r.get("target_gender"),
-                    category=r.get("item_type"),
-                )
-            )
+        items.append(_order_item_create_from_template_row(r, product))
     data = OrderCreate(
         author_telegram_id=author_telegram_id,
-        author_username=author_username,
-        author_full_name=author_full_name,
-        order_type=order_type,
-        ms_order_number=ms_order_number,
+        author_username=_clip_str(author_username, 255),
+        author_full_name=_clip_str(author_full_name, 255),
+        order_type=_clip_str(order_type, 50),
+        ms_order_number=_clip_str(ms_order_number, 100),
         comment=comment,
         items=items,
     )
-    order_resp = await create_order(data, db)
-    return order_resp
+    try:
+        order_resp = await create_order(data, db)
+        return order_resp
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "create_order_from_template: ошибка сохранения заявки (см. traceback)"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Не удалось сохранить заявку. Частая причина — слишком длинный текст "
+                "в ячейке шаблона (состав, наименование и т.д.). Сократите значения "
+                "или проверьте лог сервера бэкенда."
+            ),
+        )
 
 
 @router.get("/", response_model=list[OrderListResponse])
@@ -349,13 +503,23 @@ async def list_orders(
     responsible_telegram_id: int | None = Query(None),
     status: str | None = Query(None),
     admin: bool = Query(False),
+    include_deleted: bool = Query(
+        False,
+        description="Для admin: включить удалённые (мягко) в выборку",
+    ),
+    deleted_only: bool = Query(
+        False,
+        description="Только заявки в корзине (deleted_at задан)",
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
     """List orders with optional filters.
-    - author_telegram_id: заявки, созданные этим пользователем
+    - author_telegram_id: заявки, созданные этим пользователем (без удалённых)
     - responsible_telegram_id: заявки, где этот админ ответственный
+    - admin + include_deleted: «все» включая корзину
+    - admin + deleted_only: только корзина
     """
     stmt = (
         select(Order, User, func.count(OrderItem.id).label("items_count"))
@@ -363,18 +527,31 @@ async def list_orders(
         .outerjoin(OrderItem, Order.id == OrderItem.order_id)
         .group_by(Order.id, User.id)
     )
-    
-    if responsible_telegram_id is not None:
-        stmt = stmt.where(Order.responsible_telegram_id == responsible_telegram_id)
-    elif author_telegram_id is not None:
+
+    if author_telegram_id is not None:
         stmt = stmt.where(User.telegram_id == author_telegram_id)
+        stmt = stmt.where(Order.deleted_at.is_(None))
+    elif responsible_telegram_id is not None:
+        stmt = stmt.where(Order.responsible_telegram_id == responsible_telegram_id)
+        if deleted_only:
+            stmt = stmt.where(Order.deleted_at.isnot(None))
+        elif not include_deleted:
+            stmt = stmt.where(Order.deleted_at.is_(None))
+    elif admin:
+        if deleted_only:
+            stmt = stmt.where(Order.deleted_at.isnot(None))
+        elif not include_deleted:
+            stmt = stmt.where(Order.deleted_at.is_(None))
+    else:
+        stmt = stmt.where(Order.deleted_at.is_(None))
+
     if status:
         stmt = stmt.where(Order.status == status)
-    
+
     stmt = stmt.order_by(Order.created_at.desc()).limit(limit).offset(offset)
     result = await db.execute(stmt)
     rows = result.all()
-    
+
     return [
         OrderListResponse(
             id=order.id,
@@ -384,6 +561,7 @@ async def list_orders(
             author_username=user.username,
             responsible_username=order.responsible_username,
             items_count=items_count or 0,
+            deleted_at=order.deleted_at,
         )
         for order, user, items_count in rows
     ]
@@ -399,7 +577,7 @@ async def get_order(
         select(Order, User)
         .join(User, Order.author_id == User.id)
         .where(Order.id == order_id)
-        .options(selectinload(Order.items))
+        .options(selectinload(Order.items), selectinload(Order.attachments))
     )
     result = await db.execute(stmt)
     row = result.one_or_none()
@@ -412,16 +590,60 @@ async def get_order(
         author_id=order.author_id,
         author_telegram_id=user.telegram_id,
         author_username=user.username,
+        author_full_name=user.full_name,
         status=order.status,
         order_type=order.order_type,
         ms_order_number=order.ms_order_number,
         comment=order.comment,
         yandex_link=order.yandex_link,
-         responsible_telegram_id=order.responsible_telegram_id,
-         responsible_username=order.responsible_username,
+        responsible_telegram_id=order.responsible_telegram_id,
+        responsible_username=order.responsible_username,
         created_at=order.created_at,
+        updated_at=order.updated_at,
+        deleted_at=order.deleted_at,
         items=[OrderItemResponse.model_validate(i) for i in order.items],
+        extra_attachments=_extra_attachments_payload(order),
     )
+
+
+@router.post("/{order_id}/attachments", response_model=OrderAttachmentResponse)
+async def add_order_attachment(
+    order_id: int,
+    data: OrderAttachmentCreate,
+    author_telegram_id: int = Query(..., description="Telegram id автора заявки"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Зарегистрировать дополнительный файл (file_id бота после загрузки от пользователя)."""
+    stmt = select(Order, User).join(User, Order.author_id == User.id).where(Order.id == order_id)
+    result = await db.execute(stmt)
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order, user = row
+    if user.telegram_id != author_telegram_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the order author can attach files.",
+        )
+    if order.deleted_at is not None:
+        raise HTTPException(status_code=400, detail="ORDER_DELETED")
+    att = OrderAttachment(
+        order_id=order_id,
+        telegram_file_id=data.telegram_file_id,
+        file_name=data.file_name,
+    )
+    db.add(att)
+    await db.flush()
+    await db.refresh(att)
+    await log_action(
+        db,
+        telegram_id=author_telegram_id,
+        action="order_attachment_added",
+        entity_type="order",
+        entity_id=order_id,
+        details=(data.file_name or "")[:200],
+    )
+    return OrderAttachmentResponse.model_validate(att)
 
 
 @router.patch("/{order_id}", response_model=OrderResponse)
@@ -431,12 +653,17 @@ async def update_order(
     db: AsyncSession = Depends(get_db),
 ):
     """Update order status or yandex link."""
-    stmt = select(Order).where(Order.id == order_id).options(selectinload(Order.items))
+    stmt = select(Order).where(Order.id == order_id).options(
+        selectinload(Order.items),
+        selectinload(Order.attachments),
+    )
     result = await db.execute(stmt)
     order = result.scalar_one_or_none()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    
+    if order.deleted_at is not None:
+        raise HTTPException(status_code=400, detail="ORDER_DELETED")
+
     if data.status is not None:
         order.status = data.status
     if data.yandex_link is not None:
@@ -448,21 +675,39 @@ async def update_order(
         order.responsible_telegram_id = data.responsible_telegram_id
     if data.responsible_username is not None:
         order.responsible_username = data.responsible_username
+
+    patch = data.model_dump(exclude_unset=True)
+    if "comment" in patch:
+        order.comment = patch["comment"]
+
     if data.status is not None:
         await log_action(db, action="status_changed", entity_type="order", entity_id=order.id, details=f"to={data.status}")
     
     await db.flush()
-    
+
+    stmt_reload = (
+        select(Order)
+        .where(Order.id == order.id)
+        .options(selectinload(Order.items), selectinload(Order.attachments))
+    )
+    order = (await db.execute(stmt_reload)).scalar_one()
+
+    author_user = await db.get(User, order.author_id)
+
     sheets_service.update_order_in_registry(
         order.number,
         status=order.status,
         yandex_link=order.yandex_link,
     )
-    
+
+    u = author_user
     return OrderResponse(
         id=order.id,
         number=order.number,
         author_id=order.author_id,
+        author_telegram_id=u.telegram_id if u else None,
+        author_username=u.username if u else None,
+        author_full_name=u.full_name if u else None,
         status=order.status,
         order_type=order.order_type,
         ms_order_number=order.ms_order_number,
@@ -471,7 +716,10 @@ async def update_order(
         responsible_telegram_id=order.responsible_telegram_id,
         responsible_username=order.responsible_username,
         created_at=order.created_at,
+        updated_at=order.updated_at,
+        deleted_at=order.deleted_at,
         items=[OrderItemResponse.model_validate(i) for i in order.items],
+        extra_attachments=_extra_attachments_payload(order),
     )
 
 
@@ -519,11 +767,11 @@ async def download_order_excel(
         created_at=order.created_at,
         items=items_data,
     )
-    filename = get_excel_filename(order.number, order.created_at)
+    filename = get_order_excel_download_filename(order.number)
     return Response(
         content=excel_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition_attachment(filename)},
     )
 
 
@@ -610,14 +858,71 @@ async def download_markznak_order_excel(
 
     excel_bytes = generate_markznak_template_excel(
         items,
-        sheet_title=f"Заявка {order.number}",
+        sheet_title=f"№ {order.number}",
         force_mode=force_mode,
     )
-    filename = get_excel_filename(order.number, order.created_at).replace(
-        "order_", "markznak_"
-    )
+    filename = get_markznak_download_filename(order.number)
     return Response(
         content=excel_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition_attachment(filename)},
     )
+
+
+@router.post(
+    "/{order_id}/telegram_postings",
+    response_model=OrderTelegramPostingResponse,
+)
+async def add_order_telegram_posting(
+    order_id: int,
+    body: OrderTelegramPostingCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Бот регистрирует сообщение с МаркЗнак в чате админа (для последующего delete_message)."""
+    stmt = select(Order).where(Order.id == order_id)
+    result = await db.execute(stmt)
+    order = result.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.deleted_at is not None:
+        raise HTTPException(status_code=400, detail="ORDER_DELETED")
+    row = OrderTelegramPosting(
+        order_id=order_id,
+        chat_id=body.chat_id,
+        message_id=body.message_id,
+    )
+    db.add(row)
+    await db.flush()
+    await db.refresh(row)
+    return OrderTelegramPostingResponse(chat_id=row.chat_id, message_id=row.message_id)
+
+
+@router.get(
+    "/{order_id}/telegram_postings",
+    response_model=list[OrderTelegramPostingResponse],
+)
+async def list_order_telegram_postings(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Список зарегистрированных сообщений (в т.ч. для мягко удалённой заявки)."""
+    exists = await db.execute(select(Order.id).where(Order.id == order_id))
+    if exists.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    stmt = select(OrderTelegramPosting).where(OrderTelegramPosting.order_id == order_id)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        OrderTelegramPostingResponse(chat_id=r.chat_id, message_id=r.message_id)
+        for r in rows
+    ]
+
+
+@router.delete("/{order_id}/telegram_postings", status_code=204)
+async def clear_order_telegram_postings_route(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    await db.execute(
+        delete(OrderTelegramPosting).where(OrderTelegramPosting.order_id == order_id)
+    )
+    return Response(status_code=204)
