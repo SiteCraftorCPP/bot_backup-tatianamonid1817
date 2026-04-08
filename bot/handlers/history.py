@@ -49,7 +49,13 @@ async def history_back(callback: CallbackQuery, state: FSMContext):
                 collapse_others_when_selected=True,
             )
             items = [
-                (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+                (
+                    o["id"],
+                    o["number"],
+                    _history_order_row_caption(
+                        o, user_to_index, in_trash_list=(status_key == "trash")
+                    ),
+                )
                 for o in orders
             ]
             has_next = len(orders) > ORDERS_PER_PAGE
@@ -192,12 +198,31 @@ async def fetch_history_full_orders_for_colors() -> list[dict]:
     return await get_orders(admin=True, include_deleted=True, limit=100)
 
 
-def _history_order_row_caption(o: dict, user_to_index: dict) -> str:
-    """Подпись строки заявки в списке истории (статус + ответственный)."""
+def _is_order_soft_deleted(o: dict) -> bool:
+    """Заявка в корзине (мягкое удаление): в ответе API поле deleted_at непустое."""
+    v = o.get("deleted_at")
+    if v is None or v is False:
+        return False
+    if isinstance(v, str) and not v.strip():
+        return False
+    return True
+
+
+def _history_order_row_caption(
+    o: dict,
+    user_to_index: dict,
+    *,
+    in_trash_list: bool = False,
+) -> str:
+    """Подпись строки заявки в списке истории (статус + ответственный).
+
+    Для корзины и любой заявки с deleted_at — только статус на момент удаления,
+    без ответственного (полная карточка по «Подробнее» не меняется).
+    """
     resp = o.get("responsible_username") or ""
     status = o["status"]
-    if o.get("deleted_at"):
-        status = f"{status} 🗑"
+    if in_trash_list or _is_order_soft_deleted(o):
+        return status
     if not resp:
         return status
     label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
@@ -373,7 +398,8 @@ async def history_orders(message: Message, state: FSMContext):
     admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=None)
 
     items = [
-        (o["id"], o["number"], _history_order_row_caption(o, user_to_index)) for o in orders
+        (o["id"], o["number"], _history_order_row_caption(o, user_to_index, in_trash_list=False))
+        for o in orders
     ]
     has_next = len(orders) > ORDERS_PER_PAGE
     tw = _history_trash_inline_kw("all", {"trash_selected_ids": []})
@@ -456,7 +482,13 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
         )
     else:
         items = [
-            (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+            (
+                o["id"],
+                o["number"],
+                _history_order_row_caption(
+                    o, user_to_index, in_trash_list=(status_key == "trash")
+                ),
+            )
             for o in orders
         ]
         has_next = len(orders) > ORDERS_PER_PAGE
@@ -554,7 +586,13 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
         )
     else:
         items = [
-            (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+            (
+                o["id"],
+                o["number"],
+                _history_order_row_caption(
+                    o, user_to_index, in_trash_list=(status_key == "trash")
+                ),
+            )
             for o in orders
         ]
         has_next = len(orders) > ORDERS_PER_PAGE
@@ -662,7 +700,13 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
                 )
             else:
                 items = [
-                    (o["id"], o["number"], _history_order_row_caption(o, user_to_index))
+                    (
+                        o["id"],
+                        o["number"],
+                        _history_order_row_caption(
+                            o, user_to_index, in_trash_list=(status_key == "trash")
+                        ),
+                    )
                     for o in orders
                 ]
                 has_next = len(orders) > ORDERS_PER_PAGE
@@ -884,7 +928,14 @@ async def _history_redraw_current_list(callback: CallbackQuery, state: FSMContex
         return
 
     items = [
-        (o["id"], o["number"], _history_order_row_caption(o, user_to_index)) for o in orders
+        (
+            o["id"],
+            o["number"],
+            _history_order_row_caption(
+                o, user_to_index, in_trash_list=(status_key == "trash")
+            ),
+        )
+        for o in orders
     ]
     title = f"==================================================\nИстория заявок ({title_cat}):"
     await callback.message.edit_text(

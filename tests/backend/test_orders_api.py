@@ -74,6 +74,38 @@ async def test_create_order_with_items(client: AsyncClient, test_db_session: Asy
 
 
 @pytest.mark.asyncio
+async def test_create_order_number_uses_article_from_name_when_article_is_text(
+    client: AsyncClient,
+    fake_sheets: FakeSheetsService,
+):
+    payload = {
+        "author_telegram_id": 333,
+        "author_username": "tester_text_article",
+        "author_full_name": "Tester Text Article",
+        "order_type": "Ламода",
+        "items": [
+            {
+                "size": "2XL",
+                "quantity": 4,
+                "article": "Джемпер",
+                "name": "Джемпер мужской, арт. 33708whitebrown, размер 2XL",
+                "brand": "FLOW LAB",
+            }
+        ],
+    }
+    resp = await client.post("/orders/", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "_" in data["number"]
+    _, art_part = data["number"].split("_", 1)
+    assert art_part == "33708"
+    # Проверяем также номер, ушедший в Google Sheets
+    order_number, *_ = fake_sheets.append_calls[-1]
+    _, art_part_sheet = order_number.split("_", 1)
+    assert art_part_sheet == "33708"
+
+
+@pytest.mark.asyncio
 async def test_download_order_excel_structure(client: AsyncClient, test_db_session: AsyncSession):
     # Create user, order and items directly in DB
     user = User(telegram_id=999, username="tester", full_name="Tester")

@@ -23,23 +23,43 @@ def _sanitize_article_slug(article: str | None) -> str:
     return s or "na"
 
 
-def _public_article_part(article: str | None) -> str:
-    """По ТЗ: номер заявки «id_артикул», где артикул — числовая часть (2705 из 2705darksalmon, 33708 из 33708white)."""
-    if not article:
-        return "na"
-    s = str(article).strip()
+def _extract_numeric_article_from_name(name: str | None) -> str | None:
+    """Попробовать извлечь артикул-число из наименования (например, из «арт. 33708white»)."""
+    if not name:
+        return None
+    s = str(name).strip()
     if not s:
-        return "na"
-    m = re.match(r"^(\d+)", s)
+        return None
+    m = re.search(r"(?:арт\.?|article)\s*[:#]?\s*(\d{3,})", s, flags=re.IGNORECASE)
     if m:
         return m.group(1)
+    m = re.search(r"(\d{3,})", s)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _public_article_part(article: str | None, name: str | None = None) -> str:
+    """Публичная часть номера: приоритетно цифры артикула; если их нет — цифры из наименования."""
+    if article:
+        s = str(article).strip()
+        if s:
+            m = re.match(r"^(\d+)", s)
+            if m:
+                return m.group(1)
+            m_any = re.search(r"(\d{3,})", s)
+            if m_any:
+                return m_any.group(1)
+    by_name = _extract_numeric_article_from_name(name)
+    if by_name:
+        return by_name
     return _sanitize_article_slug(article)
 
 
-def build_public_order_number(order_id: int, article: str | None) -> str:
+def build_public_order_number(order_id: int, article: str | None, name: str | None = None) -> str:
     """Публичный номер: «31_2705» → в UI «№ 31_2705» (артикул — числа в начале полного артикула первой позиции)."""
     prefix = f"{order_id}_"
-    slug = _public_article_part(article)
+    slug = _public_article_part(article, name)
     room = _ORDER_NUMBER_MAX_LEN - len(prefix)
     if room < 1:
         return str(order_id)[:_ORDER_NUMBER_MAX_LEN]
@@ -59,13 +79,17 @@ async def assign_public_order_number(db: AsyncSession, order: Order) -> None:
     result = await db.execute(stmt)
     first = result.scalar_one_or_none()
     art: str | None = None
+    name: str | None = None
     if first:
         art = first.article
+        name = first.name
         if not art and first.product_id:
             prod = await db.get(Product, first.product_id)
             if prod:
                 art = prod.article
-    order.number = build_public_order_number(order.id, art)
+                if not name:
+                    name = prod.name
+    order.number = build_public_order_number(order.id, art, name)
 
 
 async def generate_order_number(db: AsyncSession) -> str:

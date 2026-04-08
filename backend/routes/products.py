@@ -26,8 +26,31 @@ def _normalize_category(category: str | None) -> str | None:
 _REPEAT_TEMPLATE_NOT_FOUND = "Товары по запросу не найдены"
 
 
-def _repeat_article_search_filters(article: str) -> list:
-    """Повторный товар по ТЗ: шаги ЮЛ и стран — только по совпадению артикула/наименования (без одежда/обувь)."""
+def _category_filters_for_template(category: str | None) -> list:
+    """Жесткий фильтр по выбранной категории для шаблонов повторного товара."""
+    mode = _normalize_category(category)
+    if mode == "shoes":
+        return [
+            or_(
+                Product.product_type == "shoes",
+                and_(Product.product_type.is_(None), Product.tnved_code.ilike("64%")),
+            )
+        ]
+    if mode == "clothing":
+        return [
+            or_(
+                Product.product_type == "clothing",
+                and_(
+                    Product.product_type.is_(None),
+                    or_(Product.tnved_code.is_(None), ~Product.tnved_code.ilike("64%")),
+                ),
+            )
+        ]
+    return []
+
+
+def _repeat_article_search_filters(article: str, category: str | None = None) -> list:
+    """Повторный товар: по артикулу/наименованию в рамках выбранной категории."""
     q = f"%{article.strip()}%"
     return [
         Product.is_active.is_(True),
@@ -36,7 +59,7 @@ def _repeat_article_search_filters(article: str) -> list:
             Product.variant.ilike(q),
             Product.article.ilike(q),
         ),
-    ]
+    ] + _category_filters_for_template(category)
 
 
 async def _require_products_for_repeat(
@@ -93,10 +116,11 @@ async def get_brands(
 @router.get("/template/legal_entities", response_model=list[str])
 async def get_template_legal_entities(
     article: str = Query(..., min_length=2),
+    category: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Список юридических лиц по артикулу/наименованию (шаг 2 по ТЗ, без фильтра одежда/обувь)."""
-    base_filters = _repeat_article_search_filters(article)
+    """Список юридических лиц по артикулу/наименованию в выбранной категории."""
+    base_filters = _repeat_article_search_filters(article, category)
     await _require_products_for_repeat(
         db,
         base_filters,
@@ -132,11 +156,12 @@ async def get_template_legal_entities(
 @router.get("/template/countries", response_model=list[str])
 async def get_template_countries(
     article: str = Query(..., min_length=2),
+    category: str | None = Query(None),
     legal_entity: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Список стран по артикулу и выбранному ЮЛ (шаг 3 по ТЗ, без фильтра одежда/обувь)."""
-    base_filters = _repeat_article_search_filters(article)
+    """Список стран по артикулу и выбранному ЮЛ в выбранной категории."""
+    base_filters = _repeat_article_search_filters(article, category)
     filters = list(base_filters)
     le_trim = func.trim(Product.legal_entity)
     if legal_entity and legal_entity.strip():
@@ -181,10 +206,9 @@ async def get_template_by_article(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Шаблон Excel: те же отборы по артикулу + ЮЛ + страна, что и после шагов ТЗ.
-    Параметр category задаёт только макет колонок (одежда/обувь), не состав строк справочника.
+    Шаблон Excel: те же отборы по артикулу + категория + ЮЛ + страна, что и после шагов ТЗ.
     """
-    filters = list(_repeat_article_search_filters(article))
+    filters = list(_repeat_article_search_filters(article, category))
     if legal_entity and legal_entity.strip():
         filters.append(func.trim(Product.legal_entity) == legal_entity.strip())
     if country and country.strip():

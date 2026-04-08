@@ -44,6 +44,17 @@ def test_order_detail_back_kb_user_sees_more_without_admin_row():
     flat = [btn for row in kb.inline_keyboard for btn in row]
     assert not any(b.callback_data and b.callback_data.startswith("st:") for b in flat)
     assert any(b.callback_data == "ordmore:55" for b in flat)
+    assert not any(b.callback_data and b.callback_data.startswith("del_confirm:") for b in flat)
+
+
+def test_order_detail_back_kb_user_delete_when_created_status():
+    kb = order_detail_back_kb(is_admin=False, order_id=77, show_user_delete=True)
+    flat = [btn for row in kb.inline_keyboard for btn in row]
+    assert any(b.callback_data == "del_confirm:77" for b in flat)
+    delete_idx = next(i for i, b in enumerate(flat) if b.callback_data == "del_confirm:77")
+    more_idx = next(i for i, b in enumerate(flat) if b.callback_data == "ordmore:77")
+    back_idx = next(i for i, b in enumerate(flat) if b.text == "« Назад")
+    assert delete_idx < more_idx < back_idx
 
 
 def test_order_detail_back_kb_trash_shows_purge_only():

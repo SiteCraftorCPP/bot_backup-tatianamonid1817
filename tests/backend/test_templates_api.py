@@ -333,12 +333,12 @@ async def test_template_countries_includes_rows_when_legal_entity_has_trailing_s
 
 
 @pytest.mark.asyncio
-async def test_template_countries_by_article_and_le_not_by_clothing_shoes(
+async def test_template_repeat_flow_is_category_scoped(
     client: AsyncClient,
     test_db_session: AsyncSession,
 ):
-    """По ТЗ страны считаются по артикулу и ЮЛ; тип одежда/обувь на шаге стран не режет справочник."""
-    p_od = Product(
+    """Категория должна жестко ограничивать ЮЛ/страны/шаблон своим справочником."""
+    p_clothing = Product(
         article="catmix",
         size="S",
         name="Одежда КНР",
@@ -347,21 +347,64 @@ async def test_template_countries_by_article_and_le_not_by_clothing_shoes(
         country="КНР",
         tnved_code="6202400009",
     )
-    p_shoe = Product(
+    p_shoes = Product(
         article="catmix",
         size="40",
         name="Обувь РФ",
         brand="B",
-        legal_entity="ЮЛ1",
+        legal_entity="ЮЛ2",
         country="Россия",
         tnved_code="6403990000",
     )
-    test_db_session.add_all([p_od, p_shoe])
+    test_db_session.add_all([p_clothing, p_shoes])
     await test_db_session.commit()
 
-    r_cn = await client.get(
-        "/products/template/countries",
-        params={"article": "catmix", "legal_entity": "ЮЛ1"},
+    r_le_clothes = await client.get(
+        "/products/template/legal_entities",
+        params={"article": "catmix", "category": "Одежда"},
     )
-    assert r_cn.status_code == 200
-    assert sorted(r_cn.json()) == ["КНР", "Россия"]
+    assert r_le_clothes.status_code == 200
+    assert r_le_clothes.json() == ["ЮЛ1"]
+
+    r_le_shoes = await client.get(
+        "/products/template/legal_entities",
+        params={"article": "catmix", "category": "Обувь"},
+    )
+    assert r_le_shoes.status_code == 200
+    assert r_le_shoes.json() == ["ЮЛ2"]
+
+    r_cn_clothes = await client.get(
+        "/products/template/countries",
+        params={"article": "catmix", "category": "Одежда", "legal_entity": "ЮЛ1"},
+    )
+    assert r_cn_clothes.status_code == 200
+    assert r_cn_clothes.json() == ["КНР"]
+
+    r_cn_shoes = await client.get(
+        "/products/template/countries",
+        params={"article": "catmix", "category": "Обувь", "legal_entity": "ЮЛ2"},
+    )
+    assert r_cn_shoes.status_code == 200
+    assert r_cn_shoes.json() == ["Россия"]
+
+    r_tpl_clothes = await client.get(
+        "/products/template",
+        params={"article": "catmix", "category": "Одежда"},
+    )
+    assert r_tpl_clothes.status_code == 200
+    wb_c = load_workbook(io.BytesIO(r_tpl_clothes.content))
+    ws_c = wb_c.active
+    arts_c = [ws_c.cell(row=r, column=2).value for r in range(2, ws_c.max_row + 1)]
+    assert arts_c == ["catmix"]
+    sizes_c = [str(ws_c.cell(row=r, column=3).value) for r in range(2, ws_c.max_row + 1)]
+    assert sizes_c == ["S"]
+
+    r_tpl_shoes = await client.get(
+        "/products/template",
+        params={"article": "catmix", "category": "Обувь"},
+    )
+    assert r_tpl_shoes.status_code == 200
+    wb_s = load_workbook(io.BytesIO(r_tpl_shoes.content))
+    ws_s = wb_s.active
+    sizes_s = [str(ws_s.cell(row=r, column=9).value) for r in range(2, ws_s.max_row + 1)]
+    assert sizes_s == ["40"]

@@ -100,7 +100,11 @@ async def _proceed_repeat_country_step(message: Message, state: FSMContext) -> N
     le = data.get("repeat_legal_entity")
     le_param = le.strip() if isinstance(le, str) and le.strip() else None
     try:
-        countries = await get_template_countries(article, legal_entity=le_param)
+        countries = await get_template_countries(
+            article,
+            category=category,
+            legal_entity=le_param,
+        )
     except Exception as e:
         logger.exception("Template countries fetch failed: %s", e)
         await message.answer("Ошибка загрузки данных. Попробуйте позже.")
@@ -270,7 +274,7 @@ async def _send_markznak_to_admins(
             ]
             if author_line:
                 caption_lines.append(author_line)
-            caption_lines.append(f"Количество наклеек: {codes_total}")
+            caption_lines.append(f"Количество кодов: {codes_total}")
             caption_lines.append(
                 f"Комментарий: {effective_comment if effective_comment else '—'}"
             )
@@ -542,7 +546,7 @@ async def process_article_template(message: Message, state: FSMContext):
     data = await state.get_data()
     category = data.get("category")
     try:
-        legal_entities = await get_template_legal_entities(article)
+        legal_entities = await get_template_legal_entities(article, category=category)
     except Exception as e:
         logger.exception("Template legal entities fetch failed: %s", e)
         if "404" in str(e) or "не найдены" in str(e).lower():
@@ -796,7 +800,7 @@ async def process_template_file(message: Message, state: FSMContext):
     )
     await state.set_state("template:order_comment")
     await message.answer(
-        f"Заявка № {order['number']} создана. Количество наклеек: {codes_total}.\n\n"
+        f"Заявка № {order['number']} создана. Количество кодов: {codes_total}.\n\n"
         "Введите комментарий к заявке или нажмите «Пропустить».",
         reply_markup=final_comment_kb(),
     )

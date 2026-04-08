@@ -376,7 +376,7 @@ async def process_new_template_file(message: Message, state: FSMContext):
             caption_lines = [
                 f"Новая заявка № {order['number']} (новый товар)",
                 f"Создал: @{user.username or 'user'}",
-                f"Количество наклеек: {codes_total}",
+                f"Количество кодов: {codes_total}",
             ]
             if order.get("comment"):
                 caption_lines.append(f"Комментарий: {order['comment']}")
@@ -424,7 +424,7 @@ async def process_new_template_file(message: Message, state: FSMContext):
         logger.exception("Send to work chat (new-template) failed: %s", e)
     await state.clear()
     await message.answer(
-        f"Заявка № {order['number']} создана. Количество наклеек: {codes_total}.",
+        f"Заявка № {order['number']} создана. Количество кодов: {codes_total}.",
         reply_markup=main_menu_kb(is_admin=is_admin(user.id)),
     )
 
@@ -614,7 +614,7 @@ async def process_confirm(message: Message, state: FSMContext):
             caption_lines = [
                 f"Новая заявка № {order['number']}",
                 f"Создал: @{user.username or 'user'}",
-                f"Количество наклеек: {codes_total}",
+                f"Количество кодов: {codes_total}",
                 f"Дата: {order['created_at'][:19].replace('T', ' ')}",
             ]
             if data.get("comment"):

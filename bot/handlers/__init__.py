@@ -5,6 +5,7 @@ from bot.handlers import (
     my_orders,
     history,
     yandex_link,
+    user_attachments,
     template_order,
     users,
     fallback,
@@ -17,5 +18,6 @@ router.include_router(template_order.router)
 router.include_router(my_orders.router)
 router.include_router(history.router)
 router.include_router(yandex_link.router)
+router.include_router(user_attachments.router)
 router.include_router(users.router)
 router.include_router(fallback.router)  # последним — ловит всё необработанное

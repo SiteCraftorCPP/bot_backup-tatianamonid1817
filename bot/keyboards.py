@@ -18,6 +18,7 @@ def main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
         buttons = [
             [KeyboardButton(text="📄 Заявка по шаблону")],
             [KeyboardButton(text="📦 Мои заявки")],
+            [KeyboardButton(text="📎 Добавить файл к заявке")],
             [KeyboardButton(text="❓ Помощь")],
         ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
@@ -323,7 +324,7 @@ def orders_list_inline(
             buttons.append(
                 [
                     InlineKeyboardButton(
-                        text=f"№ {num} — {status}",
+                        text=f"№{num} - {status}",
                         callback_data=f"{prefix}:{id_}",
                     ),
                     InlineKeyboardButton(text=mark, callback_data=f"trshsel:{id_}"),
@@ -374,12 +375,13 @@ def order_detail_back_kb(
     show_more_button: bool = True,
     *,
     in_trash: bool = False,
+    show_user_delete: bool = False,
 ) -> InlineKeyboardMarkup:
     """Клавиатура карточки заявки (как в ТЗ).
 
     Админ: статусы → ответственный → одна «Удалить заявку» → «Подробнее» → «Назад».
     Для заявки в корзине: «Удалить навсегда», «Подробнее», «Назад».
-    Пользователь: только «Подробнее» и «Назад» (без второй кнопки удаления).
+    Пользователь при статусе «создана»: «Удалить заявку» (мягкое удаление) → «Подробнее» → «Назад».
     """
     buttons = []
     if is_admin and order_id:
@@ -416,6 +418,21 @@ def order_detail_back_kb(
                     )
                 ]
             )
+
+    elif (
+        not is_admin
+        and show_user_delete
+        and order_id
+        and not in_trash
+    ):
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить заявку",
+                    callback_data=f"del_confirm:{order_id}",
+                )
+            ]
+        )
 
     if order_id and show_more_button:
         buttons.append(

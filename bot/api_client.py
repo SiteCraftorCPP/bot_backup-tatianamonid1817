@@ -140,10 +140,16 @@ async def get_markznak_order_excel(order_id: int) -> bytes:
         return r.content
 
 
-async def get_template_legal_entities(article: str) -> list[str]:
+async def get_template_legal_entities(
+    article: str,
+    *,
+    category: str | None = None,
+) -> list[str]:
     """Список юр. лиц для повторного товара по артикулу/наименованию (шаг по ТЗ)."""
     url = f"{get_settings().BACKEND_URL}/products/template/legal_entities"
     params: dict[str, str] = {"article": article.strip()}
+    if category:
+        params["category"] = category
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
@@ -153,11 +159,14 @@ async def get_template_legal_entities(article: str) -> list[str]:
 async def get_template_countries(
     article: str,
     *,
+    category: str | None = None,
     legal_entity: str | None = None,
 ) -> list[str]:
     """Список стран для артикула и выбранного ЮЛ (шаг по ТЗ)."""
     url = f"{get_settings().BACKEND_URL}/products/template/countries"
     params: dict[str, str] = {"article": article.strip()}
+    if category:
+        params["category"] = category
     if legal_entity and legal_entity.strip():
         params["legal_entity"] = legal_entity.strip()
     async with httpx.AsyncClient(timeout=30.0) as client:
