@@ -157,6 +157,7 @@ async def _show_my_orders_list_for_user(
 
     has_next = len(orders) > ORDERS_PER_PAGE
     title = f"{notice_block}{title_base}"
+    status_key = "all" if is_adm else None
     await bot.send_message(
         chat_id=chat_id,
         text=title,
@@ -166,7 +167,7 @@ async def _show_my_orders_list_for_user(
             has_next=has_next,
             prefix="ord",
             show_filters=True,
-            current_filter=None,
+            current_filter=status_key,
             filter_mode=filter_mode,
         ),
     )
@@ -174,7 +175,7 @@ async def _show_my_orders_list_for_user(
         orders=orders,
         page=0,
         mode="my",
-        status_filter=None,
+        status_filter=status_key,
         is_admin_in_my=is_adm,
     )
 
@@ -755,8 +756,9 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
         status_filter = data.get("status_filter")
         is_admin_in_my = data.get("is_admin_in_my", False)
 
-        # если есть фильтр статуса — сбрасываем его
-        if status_filter:
+        # Узкий фильтр (не «Все») — сбрасываем к полному списку; «Все»/None — выход в главное меню ниже.
+        narrow = status_filter and str(status_filter) != "all"
+        if narrow:
             if is_admin_in_my:
                 raw = await load_admin_my_orders_source(user_id)
                 orders = filter_admin_my_orders_rows(raw, None)
@@ -767,6 +769,8 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                 filter_mode = "my_user"
                 items = [(o["id"], o["number"], _user_visible_status(o["status"])) for o in orders]
             has_next = len(orders) > ORDERS_PER_PAGE
+            # После сброса узкого фильтра помечаем «Все», чтобы повторный «Назад» ушёл в главное меню.
+            next_filter = "all"
             await _safe_edit_card(
                 callback,
                 "Ваши заявки:\n\nВыберите заявку для просмотра:",
@@ -776,11 +780,17 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                     has_next=has_next,
                     prefix="ord",
                     show_filters=True,
-                    current_filter=None,
+                    current_filter=next_filter,
                     filter_mode=filter_mode,
                 ),
             )
-            await state.update_data(orders=orders, page=0, mode="my", status_filter=None, is_admin_in_my=is_admin_in_my)
+            await state.update_data(
+                orders=orders,
+                page=0,
+                mode="my",
+                status_filter=next_filter,
+                is_admin_in_my=is_admin_in_my,
+            )
             return
 
     except Exception as e:  # noqa: BLE001
@@ -1820,11 +1830,14 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
                 for o in orders
             ]
             filter_mode = "my_user"
+        sf_curr = status_filter
+        if is_admin_in_my_out and not sf_curr:
+            sf_curr = "all"
         has_next = len(orders) > (page + 1) * ORDERS_PER_PAGE
         title = "Ваши заявки:"
         kw = {
             "show_filters": True,
-            "current_filter": status_filter,
+            "current_filter": sf_curr,
             "filter_mode": filter_mode,
         }
 
@@ -1861,7 +1874,7 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
                 orders=orders,
                 page=page,
                 mode="my",
-                status_filter=status_filter,
+                status_filter=sf_curr,
                 is_admin_in_my=is_admin_in_my_out,
             )
     except Exception:

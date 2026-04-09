@@ -246,7 +246,7 @@ def orders_list_inline(
     filter_mode:
       - history: админ, история — все, создана, в работе, готово, отправлена, корзина
       - my_user: пользователь, мои заявки — все, создана, в работе, готова (готова=отправлена)
-      - my_admin: админ, мои заявки — в работе, готово
+      - my_admin: админ, мои заявки — все, в работе, готово
     trash_mode: в корзине — чекбокс у каждой заявки + панель массового удаления.
     """
     per_page = 8
@@ -281,12 +281,16 @@ def orders_list_inline(
             ]
         else:  # my_admin
             filter_btns = [
+                ("Все", "all"),
                 ("В работе", "в работе"),
                 ("Готово", "готово"),
             ]
         row = []
+        eff_filter = current_filter
+        if filter_mode == "my_admin" and eff_filter is None:
+            eff_filter = "all"
         for label, key in filter_btns:
-            suffix = " ✓" if current_filter == key else ""
+            suffix = " ✓" if eff_filter == key else ""
             row.append(
                 InlineKeyboardButton(
                     text=label + suffix,

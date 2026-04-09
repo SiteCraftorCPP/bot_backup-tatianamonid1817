@@ -814,7 +814,7 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
         # Фильтр для «Моих заявок» (пользователь или админ)
         else:
             is_admin_in_my = data.get("is_admin_in_my", False)
-            # «Мои заявки» для админа: только свои заявки в статусах «в работе» и «готово».
+            # «Мои заявки» для админа: полный пул назначений (фильтр вкладками на клиенте).
             if is_admin_in_my:
                 raw = await load_admin_my_orders_source(user_id)
                 orders = filter_admin_my_orders_rows(raw, status)

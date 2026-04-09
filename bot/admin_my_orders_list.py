@@ -52,5 +52,10 @@ async def load_admin_my_orders_source(user_id: int) -> list[dict]:
 def filter_admin_my_orders_rows(rows: list[dict], status: str | None) -> list[dict]:
     """status=None — объединённый список; иначе только заявки с этим статусом."""
     if status is None:
-        return [o for o in rows if (o.get("status") or "") in COMBINED_STATUSES]
-    return [o for o in rows if (o.get("status") or "") == status]
+        return [
+            o
+            for o in rows
+            if (str(o.get("status") or "").strip()) in COMBINED_STATUSES
+        ]
+    st = str(status).strip()
+    return [o for o in rows if (str(o.get("status") or "").strip()) == st]
