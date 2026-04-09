@@ -422,32 +422,32 @@ async def create_order_from_template(
         # позицию с чужим product_id и получить неверные поля в МаркЗнак.
         product = None
         # Нормализация строк для устойчивого матчинга (пробелы/регистр/NBSP).
-        article_val = str(r.get("article") or "").strip()
-        size_val = str(r.get("size") or "").strip()
-        name_val = str(r.get("name") or "").strip()
+        article_val = str(r.get("article") or "").replace("\u00A0", " ").strip()
+        size_val = str(r.get("size") or "").replace("\u00A0", " ").strip()
+        name_val = str(r.get("name") or "").replace("\u00A0", " ").strip()
         legal_entity_val = str(r.get("legal_entity") or "").replace("\u00A0", " ").strip()
-        brand_val = str(r.get("brand") or "").strip()
-        country_val = str(r.get("country") or "").strip()
-        color_val = str(r.get("color") or "").strip()
-        tnved_val = str(r.get("tnved_code") or "").strip()
-        item_type_val = str(r.get("item_type") or "").strip()
+        brand_val = str(r.get("brand") or "").replace("\u00A0", " ").strip()
+        country_val = str(r.get("country") or "").replace("\u00A0", " ").strip()
+        color_val = str(r.get("color") or "").replace("\u00A0", " ").strip()
+        tnved_val = str(r.get("tnved_code") or "").replace("\u00A0", " ").strip()
+        item_type_val = str(r.get("item_type") or "").replace("\u00A0", " ").strip()
 
-        def _norm_col(col):
-            # lower(trim(replace(col, NBSP, ' ')))
-            return func.lower(func.trim(func.replace(col, "\u00A0", " ")))
+        def _norm_text(col):
+            # trim(replace(col, NBSP, ' ')); без lower(), чтобы не ломать кириллицу на SQLite
+            return func.trim(func.replace(col, "\u00A0", " "))
 
         # 1) Основной матч: article+size + уточняющие поля (ЮЛ/страна/бренд), без name.
         # Это самый надёжный вариант для GTIN, даже если name слегка отличается.
         base_filters = [
-            _norm_col(Product.article) == article_val.lower(),
-            _norm_col(Product.size) == size_val.lower(),
+            _norm_text(Product.article) == article_val,
+            _norm_text(Product.size) == size_val,
         ]
         if legal_entity_val:
-            base_filters.append(_norm_col(Product.legal_entity) == legal_entity_val.lower())
+            base_filters.append(_norm_text(Product.legal_entity) == legal_entity_val)
         if country_val:
-            base_filters.append(_norm_col(Product.country) == country_val.lower())
+            base_filters.append(_norm_text(Product.country) == country_val)
         if brand_val:
-            base_filters.append(_norm_col(Product.brand) == brand_val.lower())
+            base_filters.append(_norm_text(Product.brand) == brand_val)
 
         result = await db.execute(select(Product).where(*base_filters))
         candidates = result.scalars().all()
@@ -459,14 +459,14 @@ async def create_order_from_template(
         if not product and len(candidates) > 1:
             narrowed_filters = list(base_filters)
             if color_val:
-                narrowed_filters.append(_norm_col(Product.color) == color_val.lower())
+                narrowed_filters.append(_norm_text(Product.color) == color_val)
             if tnved_val:
-                narrowed_filters.append(_norm_col(Product.tnved_code) == tnved_val.lower())
+                narrowed_filters.append(_norm_text(Product.tnved_code) == tnved_val)
             if item_type_val:
                 narrowed_filters.append(
                     or_(
-                        _norm_col(Product.category) == item_type_val.lower(),
-                        _norm_col(Product.variant) == item_type_val.lower(),
+                        _norm_text(Product.category) == item_type_val,
+                        _norm_text(Product.variant) == item_type_val,
                     )
                 )
             if len(narrowed_filters) > len(base_filters):
@@ -480,7 +480,7 @@ async def create_order_from_template(
         # 3) Если всё ещё несколько — дополнительно уточняем name.
         if not product and len(candidates) > 1 and name_val:
             result = await db.execute(
-                select(Product).where(*base_filters, _norm_col(Product.name) == name_val.lower())
+                select(Product).where(*base_filters, _norm_text(Product.name) == name_val)
             )
             narrowed = result.scalars().all()
             if len(narrowed) == 1:
@@ -494,15 +494,15 @@ async def create_order_from_template(
         # 4) Fallback: name+size (+ЮЛ/страна/бренд), только если уникально.
         if not product and name_val:
             name_filters = [
-                _norm_col(Product.name) == name_val.lower(),
-                _norm_col(Product.size) == size_val.lower(),
+                _norm_text(Product.name) == name_val,
+                _norm_text(Product.size) == size_val,
             ]
             if legal_entity_val:
-                name_filters.append(_norm_col(Product.legal_entity) == legal_entity_val.lower())
+                name_filters.append(_norm_text(Product.legal_entity) == legal_entity_val)
             if country_val:
-                name_filters.append(_norm_col(Product.country) == country_val.lower())
+                name_filters.append(_norm_text(Product.country) == country_val)
             if brand_val:
-                name_filters.append(_norm_col(Product.brand) == brand_val.lower())
+                name_filters.append(_norm_text(Product.brand) == brand_val)
             result = await db.execute(select(Product).where(*name_filters))
             name_candidates = result.scalars().all()
             if len(name_candidates) == 1:
@@ -570,18 +570,18 @@ async def create_order_from_template(
         # форматом (например, "30 " / "30.0"), но остальные поля совпадают.
         if not product and article_val:
             relaxed_filters = [
-                _norm_col(Product.article) == article_val.lower(),
+                _norm_text(Product.article) == article_val,
             ]
             if legal_entity_val:
-                relaxed_filters.append(_norm_col(Product.legal_entity) == legal_entity_val.lower())
+                relaxed_filters.append(_norm_text(Product.legal_entity) == legal_entity_val)
             if brand_val:
-                relaxed_filters.append(_norm_col(Product.brand) == brand_val.lower())
+                relaxed_filters.append(_norm_text(Product.brand) == brand_val)
             if country_val:
-                relaxed_filters.append(_norm_col(Product.country) == country_val.lower())
+                relaxed_filters.append(_norm_text(Product.country) == country_val)
             if color_val:
-                relaxed_filters.append(_norm_col(Product.color) == color_val.lower())
+                relaxed_filters.append(_norm_text(Product.color) == color_val)
             if tnved_val:
-                relaxed_filters.append(_norm_col(Product.tnved_code) == tnved_val.lower())
+                relaxed_filters.append(_norm_text(Product.tnved_code) == tnved_val)
             result = await db.execute(select(Product).where(*relaxed_filters))
             relaxed_candidates = result.scalars().all()
             if len(relaxed_candidates) == 1:
@@ -593,7 +593,7 @@ async def create_order_from_template(
             final_candidates = list(candidates)
             if not final_candidates and article_val:
                 result = await db.execute(
-                    select(Product).where(_norm_col(Product.article) == article_val.lower())
+                    select(Product).where(_norm_text(Product.article) == article_val)
                 )
                 final_candidates = result.scalars().all()
             if final_candidates:
@@ -943,25 +943,25 @@ async def download_markznak_order_excel(
         # (или связана с продуктом без GTIN), пытаемся дотянуть товар из справочника
         # по полям позиции заявки.
         if not product or not str(getattr(product, "gtin", "") or "").strip():
-            article_val = str(i.article or "").strip().lower()
-            size_val = str(i.size or "").strip().lower()
+            article_val = str(i.article or "").replace("\u00A0", " ").strip()
+            size_val = str(i.size or "").replace("\u00A0", " ").strip()
             if article_val:
-                def _norm_col(col):
-                    return func.lower(func.trim(func.replace(col, "\u00A0", " ")))
+                def _norm_text(col):
+                    return func.trim(func.replace(col, "\u00A0", " "))
 
-                filters = [_norm_col(Product.article) == article_val]
+                filters = [_norm_text(Product.article) == article_val]
                 if size_val:
-                    filters.append(_norm_col(Product.size) == size_val)
+                    filters.append(_norm_text(Product.size) == size_val)
                 if i.legal_entity:
-                    filters.append(_norm_col(Product.legal_entity) == str(i.legal_entity).strip().lower())
+                    filters.append(_norm_text(Product.legal_entity) == str(i.legal_entity).replace("\u00A0", " ").strip())
                 if i.brand:
-                    filters.append(_norm_col(Product.brand) == str(i.brand).strip().lower())
+                    filters.append(_norm_text(Product.brand) == str(i.brand).replace("\u00A0", " ").strip())
                 if i.country:
-                    filters.append(_norm_col(Product.country) == str(i.country).strip().lower())
+                    filters.append(_norm_text(Product.country) == str(i.country).replace("\u00A0", " ").strip())
                 if i.color:
-                    filters.append(_norm_col(Product.color) == str(i.color).strip().lower())
+                    filters.append(_norm_text(Product.color) == str(i.color).replace("\u00A0", " ").strip())
                 if i.tnved_code:
-                    filters.append(_norm_col(Product.tnved_code) == str(i.tnved_code).strip().lower())
+                    filters.append(_norm_text(Product.tnved_code) == str(i.tnved_code).replace("\u00A0", " ").strip())
 
                 res = await db.execute(select(Product).where(*filters).order_by(Product.id.desc()))
                 fallback_candidates = res.scalars().all()
