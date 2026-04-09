@@ -939,6 +939,42 @@ async def download_markznak_order_excel(
     items: list[dict] = []
     for i in order.items:
         product = i.product
+        # Жёсткий fallback для GTIN: если позиция не связана с product_id
+        # (или связана с продуктом без GTIN), пытаемся дотянуть товар из справочника
+        # по полям позиции заявки.
+        if not product or not str(getattr(product, "gtin", "") or "").strip():
+            article_val = str(i.article or "").strip().lower()
+            size_val = str(i.size or "").strip().lower()
+            if article_val:
+                def _norm_col(col):
+                    return func.lower(func.trim(func.replace(col, "\u00A0", " ")))
+
+                filters = [_norm_col(Product.article) == article_val]
+                if size_val:
+                    filters.append(_norm_col(Product.size) == size_val)
+                if i.legal_entity:
+                    filters.append(_norm_col(Product.legal_entity) == str(i.legal_entity).strip().lower())
+                if i.brand:
+                    filters.append(_norm_col(Product.brand) == str(i.brand).strip().lower())
+                if i.country:
+                    filters.append(_norm_col(Product.country) == str(i.country).strip().lower())
+                if i.color:
+                    filters.append(_norm_col(Product.color) == str(i.color).strip().lower())
+                if i.tnved_code:
+                    filters.append(_norm_col(Product.tnved_code) == str(i.tnved_code).strip().lower())
+
+                res = await db.execute(select(Product).where(*filters).order_by(Product.id.desc()))
+                fallback_candidates = res.scalars().all()
+                if fallback_candidates:
+                    # Приоритет: запись с GTIN, затем наиболее новая.
+                    fallback_candidates.sort(
+                        key=lambda p: (
+                            1 if str(getattr(p, "gtin", "") or "").strip() else 0,
+                            int(getattr(p, "id", 0) or 0),
+                        ),
+                        reverse=True,
+                    )
+                    product = fallback_candidates[0]
 
         preferred_composition: str | None = None
         if product:
