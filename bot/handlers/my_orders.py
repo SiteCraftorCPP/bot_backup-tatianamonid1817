@@ -12,6 +12,7 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     FSInputFile,
+    BufferedInputFile,
     InputMediaDocument,
     InputMediaPhoto,
     InlineKeyboardMarkup,
@@ -494,24 +495,51 @@ async def order_more_details(callback: CallbackQuery, state: FSMContext):
         photo_extras = [a for a in extras if _is_photo_filename(a.get("file_name"))]
         doc_extras = [a for a in extras if not _is_photo_filename(a.get("file_name"))]
 
-        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
-            f.write(excel_bytes)
-            tmp_path = f.name
-        try:
-            doc = FSInputFile(tmp_path, filename=filename)
-            await callback.message.answer_document(
-                document=doc,
-                caption=caption,
-                parse_mode=cap_parse_mode,
-            )
-        finally:
-            os.unlink(tmp_path)
+        # Документы (xlsx + txt и т.д.) можно слить в один send_media_group (до 10 шт.).
+        # Фото в тот же альбом положить нельзя — будет второе сообщение (альбом или одно фото).
+        if doc_extras:
+            rest_docs = list(doc_extras)
+            first_cap = 9
+            first_batch: list[InputMediaDocument] = [
+                InputMediaDocument(
+                    media=BufferedInputFile(excel_bytes, filename),
+                    caption=caption,
+                    parse_mode=cap_parse_mode,
+                )
+            ]
+            for att in rest_docs[:first_cap]:
+                first_batch.append(InputMediaDocument(media=att["telegram_file_id"]))
+            await callback.bot.send_media_group(chat_id=chat_id, media=first_batch)
+            rest_docs = rest_docs[first_cap:]
+            while rest_docs:
+                chunk = rest_docs[:10]
+                rest_docs = rest_docs[10:]
+                if len(chunk) == 1:
+                    await callback.bot.send_document(
+                        chat_id=chat_id,
+                        document=chunk[0]["telegram_file_id"],
+                    )
+                else:
+                    await callback.bot.send_media_group(
+                        chat_id=chat_id,
+                        media=[InputMediaDocument(media=a["telegram_file_id"]) for a in chunk],
+                    )
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+                f.write(excel_bytes)
+                tmp_path = f.name
+            try:
+                doc = FSInputFile(tmp_path, filename=filename)
+                await callback.message.answer_document(
+                    document=doc,
+                    caption=caption,
+                    parse_mode=cap_parse_mode,
+                )
+            finally:
+                os.unlink(tmp_path)
 
-        # Нельзя смешивать document (xlsx) и photo в одном send_media_group — сначала Excel, затем альбомы по типу.
         if photo_extras:
             await _send_homogeneous_media_group(photo_extras, as_photo=True)
-        if doc_extras:
-            await _send_homogeneous_media_group(doc_extras, as_photo=False)
     except Exception as e:
         logger.exception("Send order details / media group after ordmore failed: %s", e)
 
