@@ -1,27 +1,52 @@
 """Загрузка списка «Мои заявки» для админа (по полю ответственный).
 
-Раньше делались два запроса get_orders(..., status=в работе|готово, limit=100).
-У каждого свой LIMIT в SQL — при >100 заявок в одном статуе хвост терялся.
-Сейчас — один запрос без status, лимит повышен, фильтрация по вкладкам на клиенте.
+Раньше два запроса по статусам с малым limit теряли хвост; затем один запрос с limit=500
+мог отрезать старые заявки при >500 назначений. Сейчас — постраничная загрузка (offset)
+без status, фильтрация по вкладкам на клиенте.
 """
 
 from __future__ import annotations
 
 from bot.api_client import get_orders
 
-# Совпадает с backend list_orders max limit после правки.
-ADMIN_MY_ORDERS_LIMIT = 500
+# Размер страницы при обходе GET /orders/ (max le на backend).
+ADMIN_MY_ORDERS_PAGE = 500
+# Защита от бесконечного цикла (500 * 200 = 100k заявок на одного ответственного).
+ADMIN_MY_ORDERS_MAX_PAGES = 200
 
 # Объединённый вид (как при первом открытии «Мои заявки»): все актуальные назначения.
 COMBINED_STATUSES = frozenset({"создана", "в работе", "готово", "отправлена"})
 
 
 async def load_admin_my_orders_source(user_id: int) -> list[dict]:
-    rows = await get_orders(
-        responsible_telegram_id=user_id,
-        limit=ADMIN_MY_ORDERS_LIMIT,
-    )
-    return sorted(rows, key=lambda o: str(o.get("created_at") or ""), reverse=True)
+    """Все заявки с ответственным user_id: постранично по offset, без потери хвоста за limit.
+
+    Один запрос с limit=500 мог отрезать старые назначения, если у админа >500 строк в выборке БД.
+    """
+    merged: list[dict] = []
+    seen: set[int] = set()
+    offset = 0
+    for _ in range(ADMIN_MY_ORDERS_MAX_PAGES):
+        batch = await get_orders(
+            responsible_telegram_id=user_id,
+            limit=ADMIN_MY_ORDERS_PAGE,
+            offset=offset,
+        )
+        if not batch:
+            break
+        for o in batch:
+            try:
+                oid = int(o.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if oid in seen:
+                continue
+            seen.add(oid)
+            merged.append(o)
+        if len(batch) < ADMIN_MY_ORDERS_PAGE:
+            break
+        offset += ADMIN_MY_ORDERS_PAGE
+    return sorted(merged, key=lambda o: str(o.get("created_at") or ""), reverse=True)
 
 
 def filter_admin_my_orders_rows(rows: list[dict], status: str | None) -> list[dict]:
