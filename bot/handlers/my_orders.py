@@ -37,7 +37,7 @@ from backend.services.excel_service import (
 router = Router()
 logger = logging.getLogger(__name__)
 
-ORDERS_PER_PAGE = 16
+ORDERS_PER_PAGE = 8
 
 
 async def _all_admin_ids_for_broadcast() -> list[int]:
@@ -188,6 +188,14 @@ def _fmt_order_dt(val) -> str:
 
 def _order_codes_total(order: dict) -> int:
     return sum(int(i.get("quantity") or 0) for i in (order.get("items") or []))
+
+
+def _is_photo_filename(file_name: str | None) -> bool:
+    """Определить, что вложение — фото, по расширению имени файла."""
+    if not file_name:
+        return False
+    name = file_name.strip().lower()
+    return name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"))
 
 
 def _author_display(order: dict) -> str:
@@ -476,14 +484,20 @@ async def order_more_details(callback: CallbackQuery, state: FSMContext):
         fid = att.get("telegram_file_id")
         if not fid:
             continue
-        fn = att.get("file_name") or "файл"
-        cap = f"Доп. файл к заявке № {order['number']}: {fn}"
+        fn = att.get("file_name")
         try:
-            await callback.bot.send_document(
-                chat_id=callback.message.chat.id,
-                document=fid,
-                caption=cap,
-            )
+            # Фото отправляем как фото (чтобы было превью), остальные вложения как документы.
+            # Подпись не добавляем: список файлов уже есть в блоке "Дополнительные файлы".
+            if _is_photo_filename(fn):
+                await callback.bot.send_photo(
+                    chat_id=callback.message.chat.id,
+                    photo=fid,
+                )
+            else:
+                await callback.bot.send_document(
+                    chat_id=callback.message.chat.id,
+                    document=fid,
+                )
         except Exception as e:
             logger.exception("Resend extra attachment failed: %s", e)
 
@@ -1336,9 +1350,10 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ошибка данных.", show_alert=True)
         return
 
-    # Жёсткая проверка: назначать можно только активного администратора.
-    # Важно для старых/кэшированных кнопок, где может остаться уже удалённый админ.
-    if not await is_admin(new_resp_id):
+    # Только активный админ (role=admin в БД + в актуальном пуле UI).
+    from bot.handlers.history import is_active_admin_id
+
+    if not await is_active_admin_id(new_resp_id):
         await callback.answer(
             "Невозможно назначить заявку: администратор удалён",
             show_alert=True,
@@ -1440,17 +1455,7 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         await callback.bot.send_message(chat_id=new_resp_id, text=text_new)
     except Exception as e:
         logger.exception("Notify new responsible failed: %s", e)
-        # Частая причина: пользователь ещё не писал боту → Telegram запрещает писать первым.
-        try:
-            await callback.bot.send_message(
-                chat_id=changer_id,
-                text=(
-                    f"Не смог уведомить {new_label} о передаче заявки № {order['number']}.\n"
-                    f"Пусть он/она нажмёт /start у бота, и повторите назначение."
-                ),
-            )
-        except Exception:
-            pass
+        # Не шлём дополнительное шумное уведомление инициатору.
 
     # 2) Уведомление админу, с которого сняли заявку.
     if old_resp_id and int(old_resp_id) != int(new_resp_id):
@@ -1676,13 +1681,39 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
         from bot.handlers.history import (
             _load_admins_tuples,
             _build_user_color_mapping,
+            _build_admin_filter_buttons,
             _history_order_row_caption,
+            fetch_history_orders_list,
+            _history_trash_inline_kw,
+            _pretty_status_key,
         )
-        admins_tuples = await _load_admins_tuples()
-        full_orders = await get_orders(admin=True, limit=100)
-        user_to_index, admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
 
         sf = status_filter or "all"
+        filters_collapsed = bool(data.get("filters_collapsed", False))
+        admin_filter_id = data.get("admin_filter")
+        admins_tuples = await _load_admins_tuples()
+        active_ids = {int(t) for t, _ in admins_tuples if t is not None}
+        if admin_filter_id is not None and int(admin_filter_id) not in active_ids:
+            admin_filter_id = None
+            await state.update_data(admin_filter=None)
+
+        prev_orders = orders
+        try:
+            orders = await fetch_history_orders_list(sf, admin_filter_id=admin_filter_id)
+        except Exception:
+            logger.exception("orders_list_back: fetch_history_orders_list failed")
+            orders = prev_orders
+
+        full_orders = await get_orders(admin=True, include_deleted=True, limit=100)
+        user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
+        admin_buttons = _build_admin_filter_buttons(
+            admins_tuples,
+            user_to_index,
+            selected_admin_id=admin_filter_id,
+            collapse_others_when_selected=True,
+        )
+        tw = _history_trash_inline_kw(sf, data)
+
         items = [
             (
                 o["id"],
@@ -1697,11 +1728,14 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
         status_label = "все" if (not status_filter or status_filter == "all") else str(status_filter)
         title = f"==================================================\nИстория заявок ({status_label}):"
         kw = {
-            "show_filters": True,
-            "current_filter": status_filter,
+            "show_filters": not filters_collapsed,
+            "current_filter": sf,
             "filter_mode": "history",
-            "admin_labels": admin_labels,
+            "admin_labels": admin_buttons,
             "back_callback": "hist_back",
+            "filters_back_callback": ("fltmenu" if filters_collapsed else None),
+            "filters_back_text": _pretty_status_key(sf),
+            **tw,
         }
     else:
         items = [(o["id"], o["number"], o["status"]) for o in orders]
@@ -1732,10 +1766,10 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
                 orders=orders,
                 page=page,
                 mode="history",
-                status_filter=(status_filter or "all"),
-                admin_labels=admin_labels,
-                admin_filter=data.get("admin_filter"),
-                filters_collapsed=bool(data.get("filters_collapsed", False)),
+                status_filter=sf,
+                admin_labels=admin_buttons,
+                admin_filter=admin_filter_id,
+                filters_collapsed=filters_collapsed,
             )
         else:
             await state.update_data(

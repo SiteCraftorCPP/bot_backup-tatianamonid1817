@@ -283,11 +283,30 @@ def _admin_color_label(
     return f"{color} {main}"
 
 
-async def _load_admins_tuples() -> list[tuple[int | None, str]]:
-    """Список админов как (telegram_id, username) в стабильном порядке."""
+def _norm_username_key(username: str | None) -> str:
+    """Ключ для дедупа ников: NBSP→пробел, trim, lower."""
+    if not username:
+        return ""
+    return username.replace("\u00A0", " ").strip().lower()
+
+
+async def is_active_admin_id(telegram_id: int) -> bool:
+    """Актуальный админ: в БД role=admin и присутствует в том же списке, что в UI."""
+    tid = int(telegram_id)
+    try:
+        u = await get_user(tid)
+    except Exception:  # noqa: BLE001
+        u = None
+    if not u or str(u.get("role") or "") != "admin":
+        return False
+    return any(int(t) == tid for t, _ in await _load_admins_tuples() if t is not None)
+
+
+async def _load_admins_tuples_raw() -> list[tuple[int, str]]:
+    """Собрать админов без дедупа по username (внутренний шаг)."""
     settings = get_settings()
     cfg_ids: set[int] = set(settings.admin_ids_list)
-    admins: dict[str, str] = {}
+    admins_by_tid: dict[int, str] = {}
     try:
         admins_db = await list_admins()
     except Exception:  # noqa: BLE001
@@ -297,18 +316,49 @@ async def _load_admins_tuples() -> list[tuple[int | None, str]]:
             tid = int(a.get("telegram_id"))
         except (TypeError, ValueError):
             continue
-        admins[str(tid)] = (a.get("username") or "").strip()
+        admins_by_tid[tid] = (a.get("username") or "").strip()
         cfg_ids.discard(tid)
     for tid in cfg_ids:
-        username = ""
         try:
             u = await get_user(tid)
-            if u:
-                username = (u.get("username") or "").strip()
+            if not u or str(u.get("role") or "") != "admin":
+                continue
+            username = (u.get("username") or "").strip()
         except Exception:  # noqa: BLE001
-            pass
-        admins.setdefault(str(tid), username)
-    return [(int(k) if k.isdigit() else None, admins[k]) for k in sorted(admins.keys(), key=lambda x: (admins[x].lower(), x))]
+            continue
+        admins_by_tid.setdefault(tid, username)
+    return list(admins_by_tid.items())
+
+
+async def _load_admins_tuples() -> list[tuple[int | None, str]]:
+    """Список актуальных админов как (telegram_id, username) без дублей username.
+
+    Источник истины:
+    - role=admin в БД;
+    - ADMIN_IDS из env добавляем только если пользователь существует и тоже admin.
+    """
+    pairs = await _load_admins_tuples_raw()
+    # Уникальность по telegram_id (на случай сбоев API).
+    by_tid: dict[int, str] = {}
+    for tid, uname in pairs:
+        try:
+            it = int(tid)
+        except (TypeError, ValueError):
+            continue
+        by_tid[it] = uname
+
+    # Убираем дубли ников (после удаления/возврата и смены @).
+    sorted_items = sorted(by_tid.items(), key=lambda x: (_norm_username_key(x[1]), str(x[0])))
+    result: list[tuple[int, str]] = []
+    seen_usernames: set[str] = set()
+    for tid, uname in sorted_items:
+        key = _norm_username_key(uname)
+        if key and key in seen_usernames:
+            continue
+        if key:
+            seen_usernames.add(key)
+        result.append((tid, uname))
+    return result
 
 
 def _build_user_color_mapping(
@@ -545,6 +595,12 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
         except ValueError:
             await callback.answer("Ошибка.", show_alert=True)
             return
+        if not await is_active_admin_id(selected_admin_id):
+            await callback.answer(
+                "Этот администратор удалён. Показаны все заявки.",
+                show_alert=True,
+            )
+            selected_admin_id = None
 
     try:
         orders = await fetch_history_orders_list(
