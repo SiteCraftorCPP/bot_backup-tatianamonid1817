@@ -421,52 +421,190 @@ async def create_order_from_template(
         # у разных юрлиц/брендов. Ищем максимально строго, иначе легко "склеить"
         # позицию с чужим product_id и получить неверные поля в МаркЗнак.
         product = None
+        # Нормализация строк для устойчивого матчинга (пробелы/регистр/NBSP).
+        article_val = str(r.get("article") or "").strip()
+        size_val = str(r.get("size") or "").strip()
+        name_val = str(r.get("name") or "").strip()
+        legal_entity_val = str(r.get("legal_entity") or "").replace("\u00A0", " ").strip()
+        brand_val = str(r.get("brand") or "").strip()
+        country_val = str(r.get("country") or "").strip()
+        color_val = str(r.get("color") or "").strip()
+        tnved_val = str(r.get("tnved_code") or "").strip()
+        item_type_val = str(r.get("item_type") or "").strip()
 
-        strict_filters = [Product.size == r["size"]]
-        if r.get("name"):
-            strict_filters.append(Product.name == r.get("name"))
-        if r.get("article"):
-            strict_filters.append(Product.article == r["article"])
-        if r.get("legal_entity"):
-            legal_entity_val = str(r["legal_entity"]).strip()
-            # trim(ЮЛ) как в /products/template — иначе строки с пробелами в справочнике не матчятся.
-            strict_filters.append(func.trim(Product.legal_entity) == legal_entity_val)
-        if r.get("brand"):
-            brand_val = str(r["brand"]).strip()
-            strict_filters.append(
-                or_(
-                    Product.brand == brand_val,
-                    func.lower(Product.brand) == brand_val.lower(),
+        def _norm_col(col):
+            # lower(trim(replace(col, NBSP, ' ')))
+            return func.lower(func.trim(func.replace(col, "\u00A0", " ")))
+
+        # 1) Основной матч: article+size + уточняющие поля (ЮЛ/страна/бренд), без name.
+        # Это самый надёжный вариант для GTIN, даже если name слегка отличается.
+        base_filters = [
+            _norm_col(Product.article) == article_val.lower(),
+            _norm_col(Product.size) == size_val.lower(),
+        ]
+        if legal_entity_val:
+            base_filters.append(_norm_col(Product.legal_entity) == legal_entity_val.lower())
+        if country_val:
+            base_filters.append(_norm_col(Product.country) == country_val.lower())
+        if brand_val:
+            base_filters.append(_norm_col(Product.brand) == brand_val.lower())
+
+        result = await db.execute(select(Product).where(*base_filters))
+        candidates = result.scalars().all()
+        if len(candidates) == 1:
+            product = candidates[0]
+
+        # 2) Если всё ещё несколько — дополнительно сужаем по полям из шаблона.
+        # Это критично для повторов, где article+size совпадают у нескольких строк.
+        if not product and len(candidates) > 1:
+            narrowed_filters = list(base_filters)
+            if color_val:
+                narrowed_filters.append(_norm_col(Product.color) == color_val.lower())
+            if tnved_val:
+                narrowed_filters.append(_norm_col(Product.tnved_code) == tnved_val.lower())
+            if item_type_val:
+                narrowed_filters.append(
+                    or_(
+                        _norm_col(Product.category) == item_type_val.lower(),
+                        _norm_col(Product.variant) == item_type_val.lower(),
+                    )
                 )
-            )
+            if len(narrowed_filters) > len(base_filters):
+                result = await db.execute(select(Product).where(*narrowed_filters))
+                narrowed = result.scalars().all()
+                if len(narrowed) == 1:
+                    product = narrowed[0]
+                elif len(narrowed) > 1:
+                    candidates = narrowed
 
-        stmt = select(Product).where(*strict_filters)
-        result = await db.execute(stmt)
-        strict_candidates = result.scalars().all()
-        if len(strict_candidates) == 1:
-            product = strict_candidates[0]
-
-        # Мягкий fallback только если строгий поиск ничего не дал:
-        # 1) name+size; 2) article+size.
-        # В обоих случаях берём product_id ТОЛЬКО при уникальном совпадении.
-        if not product and r.get("name"):
-            stmt = select(Product).where(
-                Product.name == r.get("name"),
-                Product.size == r["size"],
+        # 3) Если всё ещё несколько — дополнительно уточняем name.
+        if not product and len(candidates) > 1 and name_val:
+            result = await db.execute(
+                select(Product).where(*base_filters, _norm_col(Product.name) == name_val.lower())
             )
-            result = await db.execute(stmt)
-            candidates = result.scalars().all()
-            if len(candidates) == 1:
-                product = candidates[0]
+            narrowed = result.scalars().all()
+            if len(narrowed) == 1:
+                product = narrowed[0]
+            elif len(narrowed) > 1:
+                # Среди нескольких кандидатов предпочитаем запись с GTIN.
+                with_gtin = [p for p in narrowed if getattr(p, "gtin", None)]
+                if len(with_gtin) == 1:
+                    product = with_gtin[0]
+
+        # 4) Fallback: name+size (+ЮЛ/страна/бренд), только если уникально.
+        if not product and name_val:
+            name_filters = [
+                _norm_col(Product.name) == name_val.lower(),
+                _norm_col(Product.size) == size_val.lower(),
+            ]
+            if legal_entity_val:
+                name_filters.append(_norm_col(Product.legal_entity) == legal_entity_val.lower())
+            if country_val:
+                name_filters.append(_norm_col(Product.country) == country_val.lower())
+            if brand_val:
+                name_filters.append(_norm_col(Product.brand) == brand_val.lower())
+            result = await db.execute(select(Product).where(*name_filters))
+            name_candidates = result.scalars().all()
+            if len(name_candidates) == 1:
+                product = name_candidates[0]
+            elif len(name_candidates) > 1:
+                with_gtin = [p for p in name_candidates if getattr(p, "gtin", None)]
+                if len(with_gtin) == 1:
+                    product = with_gtin[0]
+
+        # 5) Последний безопасный fallback:
+        # если после всех попыток осталось несколько кандидатов и только один из них с GTIN,
+        # берём его, чтобы не терять GTIN в итоговой заявке.
+        if not product and len(candidates) > 1:
+            with_gtin = [p for p in candidates if getattr(p, "gtin", None)]
+            if len(with_gtin) == 1:
+                product = with_gtin[0]
+
+        # 6) Детерминированный fallback: выбираем наиболее похожего кандидата.
+        # Используем только когда выбор всё ещё неоднозначный/пустой, чтобы не
+        # терять product_id/GTIN на повторных товарах.
+        if not product and candidates:
+            def _n(v: str | None) -> str:
+                return str(v or "").replace("\u00A0", " ").strip().lower()
+
+            row_item_type = _n(item_type_val)
+
+            scored: list[tuple[int, int, Product]] = []
+            for c in candidates:
+                score = 0
+                if _n(getattr(c, "article", None)) == _n(article_val):
+                    score += 5
+                if _n(getattr(c, "size", None)) == _n(size_val):
+                    score += 5
+                if legal_entity_val and _n(getattr(c, "legal_entity", None)) == _n(legal_entity_val):
+                    score += 6
+                if brand_val and _n(getattr(c, "brand", None)) == _n(brand_val):
+                    score += 6
+                if country_val and _n(getattr(c, "country", None)) == _n(country_val):
+                    score += 4
+                if color_val and _n(getattr(c, "color", None)) == _n(color_val):
+                    score += 3
+                if tnved_val and _n(getattr(c, "tnved_code", None)) == _n(tnved_val):
+                    score += 3
+                if name_val and _n(getattr(c, "name", None)) == _n(name_val):
+                    score += 2
+                if row_item_type:
+                    c_cat = _n(getattr(c, "category", None))
+                    c_var = _n(getattr(c, "variant", None))
+                    if row_item_type in (c_cat, c_var):
+                        score += 2
+
+                gtin_bonus = 1 if _n(getattr(c, "gtin", None)) else 0
+                scored.append((score, gtin_bonus, c))
+
+            scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+            if len(scored) == 1:
+                product = scored[0][2]
+            else:
+                best_score, best_gtin, best = scored[0]
+                second_score, second_gtin, _ = scored[1]
+                if (best_score, best_gtin) > (second_score, second_gtin) and best_score > 0:
+                    product = best
+
+        # 7) Последний SQL fallback: иногда размер в шаблоне может отличаться
+        # форматом (например, "30 " / "30.0"), но остальные поля совпадают.
+        if not product and article_val:
+            relaxed_filters = [
+                _norm_col(Product.article) == article_val.lower(),
+            ]
+            if legal_entity_val:
+                relaxed_filters.append(_norm_col(Product.legal_entity) == legal_entity_val.lower())
+            if brand_val:
+                relaxed_filters.append(_norm_col(Product.brand) == brand_val.lower())
+            if country_val:
+                relaxed_filters.append(_norm_col(Product.country) == country_val.lower())
+            if color_val:
+                relaxed_filters.append(_norm_col(Product.color) == color_val.lower())
+            if tnved_val:
+                relaxed_filters.append(_norm_col(Product.tnved_code) == tnved_val.lower())
+            result = await db.execute(select(Product).where(*relaxed_filters))
+            relaxed_candidates = result.scalars().all()
+            if len(relaxed_candidates) == 1:
+                product = relaxed_candidates[0]
+
+        # 8) Абсолютный fallback: чтобы не терять product_id/GTIN в заявке.
+        # Берём наиболее "полезного" кандидата: сначала с GTIN, затем самый новый (id DESC).
         if not product:
-            stmt = select(Product).where(
-                Product.article == r["article"],
-                Product.size == r["size"],
-            )
-            result = await db.execute(stmt)
-            candidates = result.scalars().all()
-            if len(candidates) == 1:
-                product = candidates[0]
+            final_candidates = list(candidates)
+            if not final_candidates and article_val:
+                result = await db.execute(
+                    select(Product).where(_norm_col(Product.article) == article_val.lower())
+                )
+                final_candidates = result.scalars().all()
+            if final_candidates:
+                final_candidates.sort(
+                    key=lambda p: (
+                        1 if str(getattr(p, "gtin", "") or "").strip() else 0,
+                        int(getattr(p, "id", 0) or 0),
+                    ),
+                    reverse=True,
+                )
+                product = final_candidates[0]
 
         items.append(_order_item_create_from_template_row(r, product))
     data = OrderCreate(
