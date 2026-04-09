@@ -8,7 +8,16 @@ import tempfile
 import httpx
 from aiogram import Router, F, Dispatcher
 from aiogram.enums import ParseMode
-from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    FSInputFile,
+    BufferedInputFile,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 
@@ -446,6 +455,15 @@ async def order_more_details(callback: CallbackQuery, state: FSMContext):
     details_html = _format_order_details_html(order)
     caption, cap_parse_mode = _telegram_document_caption(details_html)
 
+    chat_id = callback.message.chat.id
+
+    def _extra_to_input_media(att: dict) -> InputMediaDocument | InputMediaPhoto:
+        fid = att["telegram_file_id"]
+        fn = att.get("file_name")
+        if _is_photo_filename(fn):
+            return InputMediaPhoto(media=fid)
+        return InputMediaDocument(media=fid)
+
     try:
         # Админу в «Мои заявки» и в «Истории» — расширенный файл (GTIN, МаркЗнак);
         # автору-не-админу — краткий Excel по заявке.
@@ -456,41 +474,54 @@ async def order_more_details(callback: CallbackQuery, state: FSMContext):
             excel_bytes = await get_order_excel(order_id)
             filename = get_order_excel_download_filename(order["number"])
 
-        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
-            f.write(excel_bytes)
-            tmp_path = f.name
-        try:
-            doc = FSInputFile(tmp_path, filename=filename)
-            await callback.message.answer_document(
-                document=doc,
+        extras = [a for a in (order.get("extra_attachments") or []) if a.get("telegram_file_id")]
+
+        if not extras:
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+                f.write(excel_bytes)
+                tmp_path = f.name
+            try:
+                doc = FSInputFile(tmp_path, filename=filename)
+                await callback.message.answer_document(
+                    document=doc,
+                    caption=caption,
+                    parse_mode=cap_parse_mode,
+                )
+            finally:
+                os.unlink(tmp_path)
+        else:
+            # Одна «связка» в чате: альбом до 10 медиа (Telegram). Подпись «Подробности» — у Excel.
+            first = InputMediaDocument(
+                media=BufferedInputFile(excel_bytes, filename),
                 caption=caption,
                 parse_mode=cap_parse_mode,
             )
-        finally:
-            os.unlink(tmp_path)
-    except Exception as e:
-        logger.exception("Send order excel after ordmore failed: %s", e)
+            slot_after_main = 9
+            first_slice = extras[:slot_after_main]
+            media_group: list[InputMediaDocument | InputMediaPhoto] = [first]
+            for att in first_slice:
+                media_group.append(_extra_to_input_media(att))
+            await callback.bot.send_media_group(chat_id=chat_id, media=media_group)
 
-    for att in order.get("extra_attachments") or []:
-        fid = att.get("telegram_file_id")
-        if not fid:
-            continue
-        fn = att.get("file_name")
-        try:
-            # Фото отправляем как фото (чтобы было превью), остальные вложения как документы.
-            # Подпись не добавляем: список файлов уже есть в блоке "Дополнительные файлы".
-            if _is_photo_filename(fn):
-                await callback.bot.send_photo(
-                    chat_id=callback.message.chat.id,
-                    photo=fid,
-                )
-            else:
-                await callback.bot.send_document(
-                    chat_id=callback.message.chat.id,
-                    document=fid,
-                )
-        except Exception as e:
-            logger.exception("Resend extra attachment failed: %s", e)
+            rest = extras[slot_after_main:]
+            while rest:
+                chunk = rest[:10]
+                rest = rest[10:]
+                if len(chunk) == 1:
+                    att = chunk[0]
+                    fid = att["telegram_file_id"]
+                    fn = att.get("file_name")
+                    if _is_photo_filename(fn):
+                        await callback.bot.send_photo(chat_id=chat_id, photo=fid)
+                    else:
+                        await callback.bot.send_document(chat_id=chat_id, document=fid)
+                else:
+                    await callback.bot.send_media_group(
+                        chat_id=chat_id,
+                        media=[_extra_to_input_media(a) for a in chunk],
+                    )
+    except Exception as e:
+        logger.exception("Send order details / media group after ordmore failed: %s", e)
 
 
 @router.callback_query(F.data == "ord_back")
