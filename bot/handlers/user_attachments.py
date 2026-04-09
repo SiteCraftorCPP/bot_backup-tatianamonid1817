@@ -49,31 +49,17 @@ async def _notify_admins_new_attachment(
             logger.warning("admin_telegram_ids_for_notify failed: %s", e)
             recipients = []
 
-    uid = message.from_user.id if message.from_user else 0
-    who = (
-        f"@{message.from_user.username}"
-        if message.from_user and message.from_user.username
-        else (message.from_user.full_name if message.from_user else str(uid))
-    )
-    caption = (
-        f"Доп. файл к заявке № {order_number or order_id}\n"
-        f"Добавил: {who}\n"
-        f"Файл: {file_name or ('фото' if as_photo else 'файл')}"
-    )
-
     for admin_id in {int(x) for x in recipients}:
         try:
             if as_photo:
                 await message.bot.send_photo(
                     chat_id=admin_id,
                     photo=file_id,
-                    caption=caption,
                 )
             else:
                 await message.bot.send_document(
                     chat_id=admin_id,
                     document=file_id,
-                    caption=caption,
                 )
         except Exception as e:
             logger.warning(

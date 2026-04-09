@@ -80,18 +80,28 @@ class AccessMiddleware(BaseMiddleware):
 
         settings = get_settings()
         if telegram_id in settings.admin_ids_list:
-            # Админ из конфигурации: по возможности синхронизируем username/full_name в БД.
-            if from_user:
-                try:
-                    await api_client.upsert_user(
-                        telegram_id=telegram_id,
-                        username=getattr(from_user, "username", None),
-                        full_name=getattr(from_user, "full_name", None),
-                        role="admin",
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.debug("Sync admin user in AccessMiddleware failed: %s", e)
-            return await handler(event, data)
+            # Не поднимаем обратно admin, если в БД уже user/blocked (демоут важнее .env).
+            demoted_or_blocked = False
+            try:
+                existing = await api_client.get_user(telegram_id)
+                if existing:
+                    role_ex = str(existing.get("role") or "")
+                    if role_ex in ("user", "blocked"):
+                        demoted_or_blocked = True
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Access check (env admin get_user) failed: %s", e)
+            if not demoted_or_blocked:
+                if from_user:
+                    try:
+                        await api_client.upsert_user(
+                            telegram_id=telegram_id,
+                            username=getattr(from_user, "username", None),
+                            full_name=getattr(from_user, "full_name", None),
+                            role="admin",
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("Sync admin user in AccessMiddleware failed: %s", e)
+                return await handler(event, data)
 
         allowed = False
         role: str | None = None

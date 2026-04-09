@@ -10,22 +10,12 @@ from aiogram.types import Message
 
 from config import get_settings
 from bot import api_client
+from bot.handlers.main_menu import is_admin as _is_admin
 
 
 logger = logging.getLogger(__name__)
 router = Router()
 BOT_BUILD = "2026-03-17_del_user_deletes_db_and_env"
-
-
-async def _is_admin(telegram_id: int) -> bool:
-    settings = get_settings()
-    if telegram_id in settings.admin_ids_list:
-        return True
-    try:
-        user = await api_client.get_user(telegram_id)
-    except Exception:  # noqa: BLE001
-        return False
-    return bool(user and str(user.get("role")) == "admin")
 
 
 def _normalize_username(username: str | None) -> str | None:
@@ -450,15 +440,16 @@ async def cmd_demote_admin(message: Message, state: FSMContext) -> None:
             return
 
         settings = get_settings()
+        note = ""
         if telegram_id in settings.admin_ids_list:
-            await message.answer(
-                "Роль в БД обновлена на user, но этот telegram_id есть в <b>ADMIN_IDS</b>.\n"
-                "Пока он там — пользователь всё равно считается админом. Уберите из ADMIN_IDS и перезапустите бота.",
-                parse_mode="HTML",
+            note = (
+                "\n\nЭтот telegram_id всё ещё в <b>ADMIN_IDS</b> — для порядка уберите его из конфига "
+                "и перезапустите бота."
             )
-            return
-
-        await message.answer("Права администратора сняты (доступ к боту сохранён).")
+        await message.answer(
+            "Права администратора сняты (доступ к боту сохранён)." + note,
+            parse_mode="HTML",
+        )
         return
 
     await message.answer(
@@ -504,16 +495,16 @@ async def handle_demote_admin(message: Message, state: FSMContext) -> None:
         return
 
     settings = get_settings()
+    note = ""
     if telegram_id in settings.admin_ids_list:
-        await message.answer(
-            "Роль в БД обновлена на user, но этот telegram_id есть в <b>ADMIN_IDS</b>.\n"
-            "Пока он там — пользователь всё равно считается админом. Уберите из ADMIN_IDS и перезапустите бота.",
-            parse_mode="HTML",
+        note = (
+            "\n\nЭтот telegram_id всё ещё в <b>ADMIN_IDS</b> — для порядка уберите его из конфига "
+            "и перезапустите бота."
         )
-        await state.clear()
-        return
-
-    await message.answer("Права администратора сняты (доступ к боту сохранён).")
+    await message.answer(
+        "Права администратора сняты (доступ к боту сохранён)." + note,
+        parse_mode="HTML",
+    )
     await state.clear()
 
 

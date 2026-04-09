@@ -46,9 +46,17 @@ class StatsStates(StatesGroup):
 
 
 async def is_admin(telegram_id: int) -> bool:
-    """Проверка прав админа: сначала по ADMIN_IDS, затем по роли в БД."""
+    """Проверка прав админа: ADMIN_IDS не перекрывает демоут/блокировку в БД."""
     settings = get_settings()
     if telegram_id in settings.admin_ids_list:
+        try:
+            user = await api_client.get_user(telegram_id)
+        except Exception:  # noqa: BLE001
+            return True
+        if user:
+            role = str(user.get("role") or "")
+            if role in ("user", "blocked"):
+                return False
         return True
     try:
         user = await api_client.get_user(telegram_id)

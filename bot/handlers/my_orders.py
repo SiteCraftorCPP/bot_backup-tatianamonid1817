@@ -28,6 +28,7 @@ from bot.api_client import (
     clear_order_telegram_postings,
     register_order_telegram_posting,
 )
+from bot.admin_my_orders_list import filter_admin_my_orders_rows, load_admin_my_orders_source
 from bot.keyboards import main_menu_kb, orders_list_inline, order_detail_back_kb
 from bot.notification_registry import notifications_registry
 from bot.handlers.main_menu import is_admin
@@ -117,20 +118,8 @@ async def _show_my_orders_list_for_user(
     is_adm = await is_admin(user_id)
     try:
         if is_adm:
-            in_work = await get_orders(
-                responsible_telegram_id=user_id, status="в работе", limit=100
-            )
-            ready = await get_orders(
-                responsible_telegram_id=user_id, status="готово", limit=100
-            )
-            seen: set[int] = set()
-            orders: list[dict] = []
-            for o in in_work + ready:
-                oid = int(o.get("id"))
-                if oid in seen:
-                    continue
-                seen.add(oid)
-                orders.append(o)
+            raw = await load_admin_my_orders_source(user_id)
+            orders = filter_admin_my_orders_rows(raw, None)
         else:
             orders = await get_orders(author_telegram_id=user_id, limit=100)
     except Exception as e:
@@ -150,7 +139,7 @@ async def _show_my_orders_list_for_user(
 
     if is_adm:
         items = [(o["id"], o["number"], o["status"]) for o in orders]
-        title_base = "Ваши заявки (в работе и выполненные):\n\nВыберите заявку:"
+        title_base = "Ваши заявки (все назначенные на вас):\n\nВыберите заявку:"
     else:
         items = [
             (o["id"], o["number"], _user_visible_status(o["status"])) for o in orders
@@ -718,16 +707,8 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
         # если есть фильтр статуса — сбрасываем его
         if status_filter:
             if is_admin_in_my:
-                in_work = await get_orders(responsible_telegram_id=user_id, status="в работе", limit=100)
-                ready = await get_orders(responsible_telegram_id=user_id, status="готово", limit=100)
-                seen: set[int] = set()
-                orders = []
-                for o in in_work + ready:
-                    oid = int(o.get("id"))
-                    if oid in seen:
-                        continue
-                    seen.add(oid)
-                    orders.append(o)
+                raw = await load_admin_my_orders_source(user_id)
+                orders = filter_admin_my_orders_rows(raw, None)
                 filter_mode = "my_admin"
                 items = [(o["id"], o["number"], o["status"]) for o in orders]
             else:
@@ -1300,19 +1281,25 @@ async def change_responsible_start(callback: CallbackQuery, state: FSMContext):
     # чтобы кружки и подписи полностью совпадали.
     from bot.handlers.history import (
         _load_admins_tuples,
-        assignment_admin_tuples_unique_tid,
         _build_user_color_mapping,
         _admin_color_label as _history_color_label,
+        active_admin_telegram_ids,
     )
 
     admins_tuples = await _load_admins_tuples()
-    pick_tuples = await assignment_admin_tuples_unique_tid()
+    # Тот же пул, что и фильтры «История заявок» (без дублей @ и без снятых админов).
+    pick_tuples = admins_tuples
+    active_ids = await active_admin_telegram_ids()
     full_orders = await get_orders(admin=True, limit=100)
     user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
 
     # Исключаем текущего ответственного, чтобы не предлагать его ещё раз.
     buttons: list[list[InlineKeyboardButton]] = []
     for tid, username in pick_tuples:
+        if tid is None:
+            continue
+        if int(tid) not in active_ids:
+            continue
         if current_resp_id and tid == current_resp_id:
             continue
         label = _history_color_label(tid, username, user_to_index)
@@ -1467,6 +1454,7 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
     new_label = f"@{new_resp_username}" if new_resp_username else str(new_resp_id)
 
     # 1) Уведомление новому администратору о передаче заявки.
+    notify_new_ok = True
     try:
         text_new = (
             f"Вам передана заявка № {order['number']}.\n"
@@ -1475,7 +1463,7 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         await callback.bot.send_message(chat_id=new_resp_id, text=text_new)
     except Exception as e:
         logger.exception("Notify new responsible failed: %s", e)
-        # Не шлём дополнительное шумное уведомление инициатору.
+        notify_new_ok = False
 
     # 2) Уведомление админу, с которого сняли заявку.
     if old_resp_id and int(old_resp_id) != int(new_resp_id):
@@ -1489,7 +1477,13 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
         except Exception as e:
             logger.exception("Notify old responsible failed: %s", e)
 
-    await callback.answer("Ответственный обновлён.")
+    done_msg = "Ответственный обновлён."
+    if not notify_new_ok:
+        done_msg += (
+            " Личное сообщение новому ответственному не доставлено "
+            "(в Telegram бот не может писать первым — нужен /start у бота). Заявка сохранена."
+        )
+    await callback.answer(done_msg, show_alert=not notify_new_ok)
 
 
 @router.callback_query(F.data.startswith("take:"))
@@ -1660,6 +1654,7 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
     mode = data.get("mode", "my")
     status_filter = data.get("status_filter")
     admin_labels = data.get("admin_labels")
+    is_admin_in_my_out = bool(data.get("is_admin_in_my", False))
 
     # Если state пустой (часто бывает после отправки файлов/новых сообщений),
     # восстанавливаем список заново, чтобы «Назад» всегда работал.
@@ -1683,12 +1678,19 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
             msg_text = (callback.message.text or callback.message.caption or "") if callback.message else ""
             from_history_context = has_admin_filters or ("История заявок" in msg_text)
 
-            if from_history_context or await is_admin(callback.from_user.id):
+            if from_history_context:
                 mode = "history"
                 status_filter = status_filter or "all"
                 status = None if status_filter == "all" else status_filter
                 orders = await get_orders(admin=True, status=status, limit=100)
                 page = 0
+            elif await is_admin(callback.from_user.id):
+                mode = "my"
+                raw = await load_admin_my_orders_source(callback.from_user.id)
+                orders = filter_admin_my_orders_rows(raw, None)
+                status_filter = None
+                page = 0
+                is_admin_in_my_out = True
             else:
                 mode = "my"
                 status_filter = None
@@ -1758,10 +1760,22 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
             **tw,
         }
     else:
-        items = [(o["id"], o["number"], o["status"]) for o in orders]
+        if is_admin_in_my_out:
+            items = [(o["id"], o["number"], o["status"]) for o in orders]
+            filter_mode = "my_admin"
+        else:
+            items = [
+                (o["id"], o["number"], _user_visible_status(o["status"]))
+                for o in orders
+            ]
+            filter_mode = "my_user"
         has_next = len(orders) > (page + 1) * ORDERS_PER_PAGE
         title = "Ваши заявки:"
-        kw = {}
+        kw = {
+            "show_filters": True,
+            "current_filter": status_filter,
+            "filter_mode": filter_mode,
+        }
 
     text = f"{title}\n\nВыберите заявку для просмотра:"
     markup = orders_list_inline(items, page=page, has_next=has_next, prefix="ord", **kw)
@@ -1797,7 +1811,7 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
                 page=page,
                 mode="my",
                 status_filter=status_filter,
-                is_admin_in_my=data.get("is_admin_in_my", False),
+                is_admin_in_my=is_admin_in_my_out,
             )
     except Exception:
         pass

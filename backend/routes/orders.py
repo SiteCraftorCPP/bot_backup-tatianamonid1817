@@ -649,7 +649,7 @@ async def list_orders(
         False,
         description="Только заявки в корзине (deleted_at задан)",
     ),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):

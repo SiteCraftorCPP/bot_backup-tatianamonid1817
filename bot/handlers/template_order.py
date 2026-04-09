@@ -48,6 +48,14 @@ from bot.notification_registry import notifications_registry
 from backend.services.excel_service import get_markznak_download_filename
 
 router = Router()
+
+
+def _is_photo_filename(file_name: str | None) -> bool:
+    """Совпадает с логикой в my_orders (отправка превью доп. вложений)."""
+    if not file_name:
+        return False
+    name = file_name.strip().lower()
+    return name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"))
 logger = logging.getLogger(__name__)
 
 
@@ -324,14 +332,18 @@ async def _send_markznak_to_admins(
             if not fid:
                 continue
             fn = att.get("file_name") or "файл"
-            extra_caption = f"Доп. файл к заявке № {order_number}: {fn}"
             for admin_id in admin_ids:
                 try:
-                    await message.bot.send_document(
-                        chat_id=admin_id,
-                        document=fid,
-                        caption=extra_caption,
-                    )
+                    if _is_photo_filename(fn):
+                        await message.bot.send_photo(
+                            chat_id=admin_id,
+                            photo=fid,
+                        )
+                    else:
+                        await message.bot.send_document(
+                            chat_id=admin_id,
+                            document=fid,
+                        )
                 except Exception as e:
                     logger.exception(
                         "Send extra attachment to admin %s failed: %s", admin_id, e
@@ -873,7 +885,7 @@ async def template_extra_done(message: Message, state: FSMContext):
 
 @router.message(StateFilter("template:await_extra_file"), F.text == "📎 Прикрепить доп. файл")
 async def template_extra_ask(message: Message, state: FSMContext):
-    await message.answer("Отправьте файл (любой формат).")
+    await message.answer("Отправьте документ или фото сообщением в чат.")
 
 
 async def _finalize_order_with_comment(message: Message, state: FSMContext) -> None:
@@ -988,12 +1000,14 @@ async def template_final_approval_no(message: Message, state: FSMContext):
     )
 
 
-@router.message(StateFilter("template:await_extra_file"), F.document)
-async def process_extra_file(message: Message, state: FSMContext):
-    """Приём доп. файла — только в БД; админам файл уйдёт вместе с основным Excel после «Готово»."""
-    doc = message.document
-    if not doc:
-        return
+async def _register_template_extra_attachment(
+    message: Message,
+    state: FSMContext,
+    *,
+    telegram_file_id: str,
+    file_name: str | None,
+) -> None:
+    """Приём доп. файла/фото — в БД; админам вложения уйдут после «Готово» вместе с МаркЗнак."""
     user = message.from_user
     if not user:
         return
@@ -1007,8 +1021,8 @@ async def process_extra_file(message: Message, state: FSMContext):
             await add_order_attachment(
                 int(order_id),
                 author_telegram_id=user.id,
-                telegram_file_id=doc.file_id,
-                file_name=doc.file_name,
+                telegram_file_id=telegram_file_id,
+                file_name=file_name,
             )
             attached_to_order = True
         except Exception as e:
@@ -1019,7 +1033,7 @@ async def process_extra_file(message: Message, state: FSMContext):
     if attached_to_order:
         user_reply = (
             "Файл сохранён в заявке.\n\n"
-            "Прикрепить ещё один файл или нажмите «Готово»."
+            "Прикрепить ещё один файл или фото или нажмите «Готово»."
         )
     elif order_id:
         user_reply = (
@@ -1034,3 +1048,40 @@ async def process_extra_file(message: Message, state: FSMContext):
         )
 
     await message.answer(user_reply, reply_markup=done_extra_kb())
+
+
+@router.message(StateFilter("template:await_extra_file"), F.document)
+async def process_extra_file(message: Message, state: FSMContext):
+    doc = message.document
+    if not doc:
+        return
+    await _register_template_extra_attachment(
+        message,
+        state,
+        telegram_file_id=doc.file_id,
+        file_name=doc.file_name,
+    )
+
+
+@router.message(StateFilter("template:await_extra_file"), F.photo)
+async def process_extra_photo(message: Message, state: FSMContext):
+    """Фото в чат (не как документ): сохраняем file_id крупнейшего размера."""
+    if not message.photo:
+        return
+    ph = message.photo[-1]
+    name = f"photo_{ph.file_unique_id}.jpg"
+    await _register_template_extra_attachment(
+        message,
+        state,
+        telegram_file_id=ph.file_id,
+        file_name=name,
+    )
+
+
+@router.message(StateFilter("template:await_extra_file"))
+async def template_extra_unexpected(message: Message, _state: FSMContext):
+    """Не документ/фото — подсказка вместо общего fallback (кнопки обрабатываются выше по регистрации)."""
+    await message.answer(
+        "На этом шаге отправьте файл или фото вложением либо нажмите кнопку ниже.",
+        reply_markup=done_extra_kb(),
+    )

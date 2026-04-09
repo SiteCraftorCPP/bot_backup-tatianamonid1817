@@ -5,6 +5,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 
 from config import get_settings
+from bot.admin_my_orders_list import filter_admin_my_orders_rows, load_admin_my_orders_source
 from bot.api_client import get_orders, get_order, list_admins, get_user, purge_trash_orders
 from bot.keyboards import main_menu_kb, orders_list_inline
 from bot.handlers.main_menu import is_admin as _is_admin
@@ -291,21 +292,8 @@ def _norm_username_key(username: str | None) -> str:
 
 
 async def active_admin_telegram_ids() -> set[int]:
-    """Все telegram_id действующих админов (как в сыром пуле API+env), без дедупа по @.
-
-    Важно: не использовать сюда _load_admins_tuples() с дедупом по username —
-    иначе проверка «можно ли назначить» расходится с реальностью БД.
-    """
+    """Telegram_id действующих админов — только после перепроверки get_user (как PATCH /orders)."""
     return {int(t) for t, _ in await _load_admins_tuples_raw()}
-
-
-async def assignment_admin_tuples_unique_tid() -> list[tuple[int, str]]:
-    """Список для кнопок «сменить ответственного»: один ряд на telegram_id."""
-    raw = await _load_admins_tuples_raw()
-    by_tid: dict[int, str] = {}
-    for tid, uname in raw:
-        by_tid[int(tid)] = (uname or "").strip()
-    return sorted(by_tid.items(), key=lambda x: x[0])
 
 
 async def is_active_admin_id(telegram_id: int) -> bool:
@@ -314,9 +302,18 @@ async def is_active_admin_id(telegram_id: int) -> bool:
 
 
 async def _load_admins_tuples_raw() -> list[tuple[int, str]]:
-    """Собрать админов без дедупа по username (внутренний шаг)."""
+    """Собрать админов без дедупа по username.
+
+    Для каждой записи из list_admins делаем get_user: только role=admin (как backend при назначении).
+    Иначе возможен «залипший» admin в списке при рассинхроне или старом UI.
+    """
     settings = get_settings()
-    cfg_ids: set[int] = set(settings.admin_ids_list)
+    cfg_ids: set[int] = set()
+    for x in settings.admin_ids_list:
+        try:
+            cfg_ids.add(int(x))
+        except (TypeError, ValueError):
+            continue
     admins_by_tid: dict[int, str] = {}
     try:
         admins_db = await list_admins()
@@ -327,17 +324,25 @@ async def _load_admins_tuples_raw() -> list[tuple[int, str]]:
             tid = int(a.get("telegram_id"))
         except (TypeError, ValueError):
             continue
-        admins_by_tid[tid] = (a.get("username") or "").strip()
+        try:
+            u = await get_user(tid)
+        except Exception:  # noqa: BLE001
+            continue
+        if not u or str(u.get("role") or "") != "admin":
+            continue
+        uname = (u.get("username") or a.get("username") or "").strip()
+        admins_by_tid[tid] = uname
         cfg_ids.discard(tid)
     for tid in cfg_ids:
         try:
             u = await get_user(tid)
-            if not u or str(u.get("role") or "") != "admin":
-                continue
-            username = (u.get("username") or "").strip()
         except Exception:  # noqa: BLE001
             continue
-        admins_by_tid.setdefault(tid, username)
+        if u is None:
+            admins_by_tid.setdefault(tid, "")
+        elif str(u.get("role") or "") == "admin":
+            username = (u.get("username") or "").strip()
+            admins_by_tid.setdefault(tid, username)
     return list(admins_by_tid.items())
 
 
@@ -811,28 +816,10 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
             is_admin_in_my = data.get("is_admin_in_my", False)
             # «Мои заявки» для админа: только свои заявки в статусах «в работе» и «готово».
             if is_admin_in_my:
-                if status is None:
-                    in_work = await get_orders(
-                        responsible_telegram_id=user_id, status="в работе", limit=100
-                    )
-                    ready = await get_orders(
-                        responsible_telegram_id=user_id, status="готово", limit=100
-                    )
-                    seen_ids: set[int] = set()
-                    orders = []
-                    for o in in_work + ready:
-                        oid = int(o.get("id"))
-                        if oid in seen_ids:
-                            continue
-                        seen_ids.add(oid)
-                        orders.append(o)
-                else:
-                    # Для фильтров «в работе» и «готово» используем прямой статус.
-                    orders = await get_orders(
-                        responsible_telegram_id=user_id, status=status, limit=100
-                    )
+                raw = await load_admin_my_orders_source(user_id)
+                orders = filter_admin_my_orders_rows(raw, status)
                 filter_mode = "my_admin"
-                title_base = "Ваши заявки (в работе и выполненные)"
+                title_base = "Ваши заявки (все назначенные на вас)"
             else:
                 # «Мои заявки» для пользователя: авторские заявки.
                 if status is None:
