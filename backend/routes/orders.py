@@ -802,6 +802,19 @@ async def update_order(
     if order.deleted_at is not None:
         raise HTTPException(status_code=400, detail="ORDER_DELETED")
 
+    patch_incoming = data.model_dump(exclude_unset=True)
+    if "responsible_telegram_id" in patch_incoming:
+        tid_new = patch_incoming["responsible_telegram_id"]
+        if tid_new is not None:
+            ru = (
+                await db.execute(select(User).where(User.telegram_id == tid_new))
+            ).scalar_one_or_none()
+            if not ru or str(ru.role) != "admin":
+                raise HTTPException(
+                    status_code=400,
+                    detail="RESPONSIBLE_NOT_ACTIVE_ADMIN",
+                )
+
     if data.status is not None:
         order.status = data.status
     if data.yandex_link is not None:
@@ -814,7 +827,7 @@ async def update_order(
     if data.responsible_username is not None:
         order.responsible_username = data.responsible_username
 
-    patch = data.model_dump(exclude_unset=True)
+    patch = patch_incoming
     if "comment" in patch:
         order.comment = patch["comment"]
 

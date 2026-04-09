@@ -290,16 +290,27 @@ def _norm_username_key(username: str | None) -> str:
     return username.replace("\u00A0", " ").strip().lower()
 
 
+async def active_admin_telegram_ids() -> set[int]:
+    """Все telegram_id действующих админов (как в сыром пуле API+env), без дедупа по @.
+
+    Важно: не использовать сюда _load_admins_tuples() с дедупом по username —
+    иначе проверка «можно ли назначить» расходится с реальностью БД.
+    """
+    return {int(t) for t, _ in await _load_admins_tuples_raw()}
+
+
+async def assignment_admin_tuples_unique_tid() -> list[tuple[int, str]]:
+    """Список для кнопок «сменить ответственного»: один ряд на telegram_id."""
+    raw = await _load_admins_tuples_raw()
+    by_tid: dict[int, str] = {}
+    for tid, uname in raw:
+        by_tid[int(tid)] = (uname or "").strip()
+    return sorted(by_tid.items(), key=lambda x: x[0])
+
+
 async def is_active_admin_id(telegram_id: int) -> bool:
-    """Актуальный админ: в БД role=admin и присутствует в том же списке, что в UI."""
-    tid = int(telegram_id)
-    try:
-        u = await get_user(tid)
-    except Exception:  # noqa: BLE001
-        u = None
-    if not u or str(u.get("role") or "") != "admin":
-        return False
-    return any(int(t) == tid for t, _ in await _load_admins_tuples() if t is not None)
+    """Можно ли назначить ответственным (совпадает с проверкой на backend PATCH)."""
+    return int(telegram_id) in await active_admin_telegram_ids()
 
 
 async def _load_admins_tuples_raw() -> list[tuple[int, str]]:

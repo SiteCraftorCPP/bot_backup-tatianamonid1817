@@ -4,6 +4,8 @@ import logging
 import os
 import re
 import tempfile
+
+import httpx
 from aiogram import Router, F, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
@@ -1298,17 +1300,19 @@ async def change_responsible_start(callback: CallbackQuery, state: FSMContext):
     # чтобы кружки и подписи полностью совпадали.
     from bot.handlers.history import (
         _load_admins_tuples,
+        assignment_admin_tuples_unique_tid,
         _build_user_color_mapping,
         _admin_color_label as _history_color_label,
     )
 
     admins_tuples = await _load_admins_tuples()
+    pick_tuples = await assignment_admin_tuples_unique_tid()
     full_orders = await get_orders(admin=True, limit=100)
     user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
 
     # Исключаем текущего ответственного, чтобы не предлагать его ещё раз.
     buttons: list[list[InlineKeyboardButton]] = []
-    for tid, username in admins_tuples:
+    for tid, username in pick_tuples:
         if current_resp_id and tid == current_resp_id:
             continue
         label = _history_color_label(tid, username, user_to_index)
@@ -1401,6 +1405,22 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
             responsible_telegram_id=new_resp_id,
             responsible_username=username,
         )
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 400:
+            try:
+                body = e.response.json()
+                detail = body.get("detail") if isinstance(body, dict) else None
+            except Exception:
+                detail = None
+            if detail == "RESPONSIBLE_NOT_ACTIVE_ADMIN":
+                await callback.answer(
+                    "Невозможно назначить заявку: администратор удалён",
+                    show_alert=True,
+                )
+                return
+        logger.exception("Update responsible failed: %s", e)
+        await callback.answer("Ошибка сохранения ответственного.", show_alert=True)
+        return
     except Exception as e:
         logger.exception("Update responsible failed: %s", e)
         await callback.answer("Ошибка сохранения ответственного.", show_alert=True)
