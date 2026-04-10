@@ -15,25 +15,7 @@ from bot.handlers.main_menu import is_admin as _is_admin
 
 logger = logging.getLogger(__name__)
 router = Router()
-BOT_BUILD = "2026-04-10_demote_unassign_orders"
-
-
-async def _clear_responsible_on_orders_after_staff_change(
-    *,
-    target_telegram_id: int,
-    requester_telegram_id: int,
-) -> None:
-    """После демоута/блокировки — снять ответственного со всех заявок этого telegram_id."""
-    try:
-        await api_client.unassign_responsible_orders_by_telegram(
-            target_telegram_id=target_telegram_id,
-            requester_telegram_id=requester_telegram_id,
-        )
-    except Exception:
-        logger.exception(
-            "unassign_responsible_orders_by_telegram failed (target=%s)",
-            target_telegram_id,
-        )
+BOT_BUILD = "2026-04-10_keep_responsible_on_demote"
 
 
 def _normalize_username(username: str | None) -> str | None:
@@ -355,11 +337,6 @@ async def cmd_del_user(message: Message, state: FSMContext) -> None:
             await message.answer("Пользователь не найден.")
             return
 
-        await _clear_responsible_on_orders_after_staff_change(
-            target_telegram_id=telegram_id,
-            requester_telegram_id=user_id,
-        )
-
         # Если id был в ADMIN_IDS — убираем его оттуда автоматически.
         settings = get_settings()
         if telegram_id in settings.admin_ids_list:
@@ -418,11 +395,6 @@ async def handle_delete_user(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
-    await _clear_responsible_on_orders_after_staff_change(
-        target_telegram_id=telegram_id,
-        requester_telegram_id=admin_id,
-    )
-
     settings = get_settings()
     if telegram_id in settings.admin_ids_list:
         if _remove_admin_id_from_env(telegram_id):
@@ -476,10 +448,6 @@ async def cmd_demote_admin(message: Message, state: FSMContext) -> None:
                 "\n\nЭтот telegram_id всё ещё в <b>ADMIN_IDS</b> — для порядка уберите его из конфига "
                 "и перезапустите бота."
             )
-        await _clear_responsible_on_orders_after_staff_change(
-            target_telegram_id=telegram_id,
-            requester_telegram_id=user_id,
-        )
         await message.answer(
             "Права администратора сняты (доступ к боту сохранён)." + note,
             parse_mode="HTML",
@@ -535,10 +503,6 @@ async def handle_demote_admin(message: Message, state: FSMContext) -> None:
             "\n\nЭтот telegram_id всё ещё в <b>ADMIN_IDS</b> — для порядка уберите его из конфига "
             "и перезапустите бота."
         )
-    await _clear_responsible_on_orders_after_staff_change(
-        target_telegram_id=telegram_id,
-        requester_telegram_id=admin_id,
-    )
     await message.answer(
         "Права администратора сняты (доступ к боту сохранён)." + note,
         parse_mode="HTML",
