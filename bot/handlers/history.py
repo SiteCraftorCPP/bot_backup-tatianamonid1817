@@ -304,45 +304,39 @@ async def is_active_admin_id(telegram_id: int) -> bool:
 async def _load_admins_tuples_raw() -> list[tuple[int, str]]:
     """Собрать админов без дедупа по username.
 
-    Для каждой записи из list_admins делаем get_user: только role=admin (как backend при назначении).
-    Иначе возможен «залипший» admin в списке при рассинхроне или старом UI.
+    Кандидаты: union(ADMIN_IDS, list_admins). Для каждого telegram_id — ровно один get_user;
+    в списке только role=admin (как PATCH /orders при назначении ответственного).
+
+    Так не остаются «призраки» из .env после удаления записи из БД и не тянется устаревший
+    username из ответа list_admins без сверки с актуальной ролью.
     """
     settings = get_settings()
-    cfg_ids: set[int] = set()
+    candidate_ids: set[int] = set()
     for x in settings.admin_ids_list:
         try:
-            cfg_ids.add(int(x))
+            candidate_ids.add(int(x))
         except (TypeError, ValueError):
             continue
-    admins_by_tid: dict[int, str] = {}
     try:
         admins_db = await list_admins()
     except Exception:  # noqa: BLE001
         admins_db = []
     for a in admins_db or []:
         try:
-            tid = int(a.get("telegram_id"))
+            candidate_ids.add(int(a.get("telegram_id")))
         except (TypeError, ValueError):
             continue
+
+    admins_by_tid: dict[int, str] = {}
+    for tid in sorted(candidate_ids):
         try:
             u = await get_user(tid)
         except Exception:  # noqa: BLE001
             continue
-        if not u or str(u.get("role") or "") != "admin":
+        if not u or str(u.get("role") or "").strip() != "admin":
             continue
-        uname = (u.get("username") or a.get("username") or "").strip()
-        admins_by_tid[tid] = uname
-        cfg_ids.discard(tid)
-    # Остаток ADMIN_IDS: только если запись в БД есть и role=admin.
-    # Раньше при u is None добавляли «призрака» — кнопка в «Истории» не исчезала после удаления юзера из БД.
-    for tid in cfg_ids:
-        try:
-            u = await get_user(tid)
-        except Exception:  # noqa: BLE001
-            continue
-        if u is not None and str(u.get("role") or "") == "admin":
-            username = (u.get("username") or "").strip()
-            admins_by_tid.setdefault(tid, username)
+        admins_by_tid[tid] = str(u.get("username") or "").strip()
+
     return list(admins_by_tid.items())
 
 
