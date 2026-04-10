@@ -262,12 +262,7 @@ def _format_order_details_html(order: dict) -> str:
     resp = order.get("responsible_username")
     resp_id = order.get("responsible_telegram_id")
     if resp or resp_id is not None:
-        bits: list[str] = []
-        if resp:
-            bits.append(f"@{resp}")
-        if resp_id is not None and str(resp_id).strip():
-            bits.append(f"id {resp_id}")
-        rlabel = " · ".join(bits) if bits else "—"
+        rlabel = f"@{resp}" if resp else str(resp_id or "")
         parts.append(f"Ответственный: {html.escape(rlabel)}")
     else:
         parts.append("Ответственный: не назначен")
