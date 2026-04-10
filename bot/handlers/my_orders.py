@@ -376,24 +376,6 @@ async def _render_order_card(
     await callback.answer()
 
 
-COLORS = ["🟢", "🟠", "🔵", "🟣", "🟡", "🟤"]
-
-
-def _admin_color_label(telegram_id: int | None, username: str | None) -> str:
-    """Вернуть цветной кружок + username/id для администратора (как в истории заявок)."""
-    if not telegram_id and not username:
-        return ""
-    # Ключ для цвета: в первую очередь username (чтобы совпадать с историей),
-    # иначе telegram_id.
-    if username:
-        key = username.lower()
-    else:
-        key = str(telegram_id or "")
-    color = COLORS[hash(key) % len(COLORS)]
-    main = f"@{username}" if username else key
-    return f"{color} {main}"
-
-
 def _user_visible_status(status: str) -> str:
     """Маппинг внутренних статусов в пользовательские.
 

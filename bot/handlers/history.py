@@ -1,4 +1,5 @@
 """History of orders - admin only."""
+import hashlib
 import logging
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -298,22 +299,27 @@ def _user_key(telegram_id: int | None, username: str | None) -> str:
     return str(telegram_id or "")
 
 
+def _stable_color_index_for_user_key(user_key: str) -> int:
+    """Индекс цвета от ключа: не меняется при демоуте (в отличие от позиции в списке админов)."""
+    if not user_key:
+        return 0
+    digest = hashlib.md5(user_key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % len(COLORS)
+
+
 def _admin_color_label(
     telegram_id: int | None,
     username: str | None,
     user_to_index: dict | None = None,
 ) -> str:
-    """Цветной кружок + username/id. Если передан user_to_index — цвет уникален для пользователя."""
+    """Цветной кружок + username/id. Цвет стабилен по _user_key (MD5), не от порядка в списке админов."""
+    del user_to_index
     if not telegram_id and not username:
         return ""
     main = f"@{username}" if username else str(telegram_id or "")
-    if user_to_index is not None:
-        key = _user_key(telegram_id, username)
-        idx = user_to_index.get(key, 0)
-        color = COLORS[idx % len(COLORS)]
-    else:
-        key = (username or "").lower() or str(telegram_id or "")
-        color = COLORS[hash(key) % len(COLORS)]
+    key = _user_key(telegram_id, username)
+    idx = _stable_color_index_for_user_key(key)
+    color = COLORS[idx % len(COLORS)]
     return f"{color} {main}"
 
 
@@ -425,9 +431,8 @@ def _build_user_color_mapping(
     orders: list[dict],
     admins_tuples: list[tuple[int | None, str]],
 ) -> tuple[dict, list[str]]:
-    """Строит стабильный маппинг user_key -> индекс цвета.
-    Сначала все админы в фиксированном порядке, затем ответственные из заявок (не админы).
-    Один и тот же пользователь всегда получает один и тот же цвет при любом фильтре/пагинации.
+    """Строит маппинг user_key -> индекс (для совместимости). Метки с цветом — через MD5 в _admin_color_label,
+    чтобы цвет не менялся после демоута (раньше индекс зависел от «админы первыми, потом остальные»).
     """
     responsibles: set[str] = set()
     for o in orders:
