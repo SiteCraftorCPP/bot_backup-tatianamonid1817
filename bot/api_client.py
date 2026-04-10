@@ -71,6 +71,32 @@ async def get_orders(
         return r.json()
 
 
+async def repair_responsible_telegram_self(telegram_id: int) -> int:
+    """Выставить в заявках верный responsible_telegram_id, если @username совпадает с админом, а id был другим."""
+    url = f"{get_settings().BACKEND_URL}/orders/repair-responsible-telegram"
+    params = {"telegram_id": telegram_id, "requester_telegram_id": telegram_id}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(url, params=params)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, dict) and data.get("fixed") is not None:
+            return int(data["fixed"])
+        return 0
+
+
+async def try_repair_responsible_telegram_self(telegram_id: int) -> None:
+    try:
+        n = await repair_responsible_telegram_self(telegram_id)
+        if n > 0:
+            logger.info(
+                "repair_responsible_telegram_self: исправлено заявок: %s (telegram_id=%s)",
+                n,
+                telegram_id,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("repair_responsible_telegram_self failed: %s", e)
+
+
 async def purge_trash_orders(
     requester_telegram_id: int,
     ids: list[int] | None = None,

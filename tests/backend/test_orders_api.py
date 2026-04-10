@@ -188,3 +188,37 @@ async def test_order_attachment_register_and_get(client: AsyncClient, test_db_se
     body = r_get.json()
     assert len(body.get("extra_attachments") or []) == 1
     assert body["extra_attachments"][0]["file_name"] == "3215.xlsx"
+
+
+@pytest.mark.asyncio
+async def test_repair_responsible_telegram(client: AsyncClient, test_db_session: AsyncSession):
+    author = User(telegram_id=100, username="auth", role="user")
+    admin = User(telegram_id=555_555, username="julia_test", role="admin")
+    test_db_session.add_all([author, admin])
+    await test_db_session.flush()
+    order = Order(
+        number="w-repair-tg",
+        author_id=author.id,
+        status="в работе",
+        responsible_telegram_id=999_999,
+        responsible_username="@julia_test",
+    )
+    test_db_session.add(order)
+    await test_db_session.commit()
+
+    r_forbid = await client.post(
+        "/orders/repair-responsible-telegram",
+        params={"telegram_id": 555_555, "requester_telegram_id": 111},
+    )
+    assert r_forbid.status_code == 403
+
+    r = await client.post(
+        "/orders/repair-responsible-telegram",
+        params={"telegram_id": 555_555, "requester_telegram_id": 555_555},
+    )
+    assert r.status_code == 200
+    assert r.json()["fixed"] == 1
+
+    r2 = await client.get(f"/orders/{order.id}")
+    assert r2.status_code == 200
+    assert r2.json()["responsible_telegram_id"] == 555_555

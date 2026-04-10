@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from bot.api_client import get_orders
+from bot.api_client import get_orders, try_repair_responsible_telegram_self
 
 # Размер страницы при обходе GET /orders/ (max le на backend).
 ADMIN_MY_ORDERS_PAGE = 500
@@ -23,6 +23,8 @@ async def load_admin_my_orders_source(user_id: int) -> list[dict]:
 
     Один запрос с limit=500 мог отрезать старые назначения, если у админа >500 строк в выборке БД.
     """
+    await try_repair_responsible_telegram_self(user_id)
+
     merged: list[dict] = []
     seen: set[int] = set()
     offset = 0

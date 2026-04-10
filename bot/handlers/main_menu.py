@@ -83,6 +83,7 @@ async def cmd_start(message: Message):
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("Failed to sync admin user via /start: %s", e)
+        await api_client.try_repair_responsible_telegram_self(user_id)
     await message.answer(
         "Добро пожаловать в бот заявок «Честный знак».\n\n"
         "Выберите действие:",

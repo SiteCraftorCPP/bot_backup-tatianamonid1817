@@ -705,6 +705,66 @@ async def list_orders(
     ]
 
 
+def _norm_username_for_responsible_match(value: str | None) -> str:
+    """Сравнение @username в заявке с username в users (без @, lower, NBSP→пробел)."""
+    if not value:
+        return ""
+    return (
+        str(value)
+        .replace("\u00a0", " ")
+        .strip()
+        .lstrip("@")
+        .lower()
+    )
+
+
+@router.post("/repair-responsible-telegram")
+async def repair_responsible_telegram(
+    telegram_id: int = Query(..., description="Актуальный telegram_id админа"),
+    requester_telegram_id: int = Query(
+        ..., description="Должен совпадать с telegram_id (починка только «своих» заявок)"
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Исправить responsible_telegram_id в заявках, где в БД записан чужой id, а @username совпадает с админом.
+
+    Типичный сценарий: при /add_admin ошиблись id, либо id менялся; в истории виден правильный @ник,
+    а «Мои заявки» и личные уведомления шли на неверный chat_id.
+    """
+    if int(telegram_id) != int(requester_telegram_id):
+        raise HTTPException(status_code=403, detail="FORBIDDEN")
+
+    urow = await db.execute(select(User).where(User.telegram_id == telegram_id))
+    user = urow.scalar_one_or_none()
+    if not user or str(user.role) != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    target_key = _norm_username_for_responsible_match(user.username)
+    if not target_key:
+        return {"fixed": 0}
+
+    want_username = _clip_str(user.username, 255)
+    ores = await db.execute(select(Order).where(Order.responsible_username.isnot(None)))
+    fixed = 0
+    for order in ores.scalars():
+        if _norm_username_for_responsible_match(order.responsible_username) != target_key:
+            continue
+        cur = order.responsible_telegram_id
+        if cur is None or int(cur) != int(telegram_id):
+            order.responsible_telegram_id = int(telegram_id)
+            if want_username:
+                order.responsible_username = want_username
+            fixed += 1
+    if fixed:
+        logger.info(
+            "repair_responsible_telegram: fixed %s orders for telegram_id=%s username=%r",
+            fixed,
+            telegram_id,
+            user.username,
+        )
+    return {"fixed": fixed}
+
+
 @router.get("/{order_id}", response_model=OrderResponse)
 async def get_order(
     order_id: int,

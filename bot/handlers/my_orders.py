@@ -33,6 +33,7 @@ from bot.api_client import (
     delete_order as api_delete_order,
     delete_order_admin as api_delete_order_admin,
     admin_telegram_ids_for_notify,
+    try_repair_responsible_telegram_self,
     list_order_telegram_postings,
     clear_order_telegram_postings,
     register_order_telegram_posting,
@@ -1476,6 +1477,8 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
     if not updated:
         await callback.answer("Заявка не найдена или не обновлена.", show_alert=True)
         return
+
+    await try_repair_responsible_telegram_self(new_resp_id)
 
     # Перерисовываем карточку заявки с новым ответственным и тем же цветом, что в истории.
     try:
