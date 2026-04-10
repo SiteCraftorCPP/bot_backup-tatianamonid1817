@@ -333,14 +333,14 @@ async def _load_admins_tuples_raw() -> list[tuple[int, str]]:
         uname = (u.get("username") or a.get("username") or "").strip()
         admins_by_tid[tid] = uname
         cfg_ids.discard(tid)
+    # Остаток ADMIN_IDS: только если запись в БД есть и role=admin.
+    # Раньше при u is None добавляли «призрака» — кнопка в «Истории» не исчезала после удаления юзера из БД.
     for tid in cfg_ids:
         try:
             u = await get_user(tid)
         except Exception:  # noqa: BLE001
             continue
-        if u is None:
-            admins_by_tid.setdefault(tid, "")
-        elif str(u.get("role") or "") == "admin":
+        if u is not None and str(u.get("role") or "") == "admin":
             username = (u.get("username") or "").strip()
             admins_by_tid.setdefault(tid, username)
     return list(admins_by_tid.items())
