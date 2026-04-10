@@ -4,7 +4,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
-from sqlalchemy import select, func, or_, delete
+from sqlalchemy import select, func, or_, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -703,6 +703,40 @@ async def list_orders(
         )
         for order, user, items_count in rows
     ]
+
+
+async def _db_user_is_admin(telegram_id: int, db: AsyncSession) -> bool:
+    row = await db.execute(select(User).where(User.telegram_id == telegram_id))
+    u = row.scalar_one_or_none()
+    return bool(u and str(u.role) == "admin")
+
+
+@router.post("/unassign-responsible-by-telegram")
+async def unassign_responsible_by_telegram(
+    target_telegram_id: int = Query(..., description="С кого снять ответственность"),
+    requester_telegram_id: int = Query(..., description="Кто запрашивает (должен быть admin)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Обнулить ответственного во всех заявках, где указан этот telegram_id.
+
+    Вызывается ботом после /demote_admin и /del_user, чтобы снятый админ не светился в истории и его нельзя было выбрать через старые карточки.
+    """
+    if not await _db_user_is_admin(requester_telegram_id, db):
+        raise HTTPException(status_code=403, detail="Admin only")
+    res = await db.execute(
+        update(Order)
+        .where(Order.responsible_telegram_id == target_telegram_id)
+        .values(responsible_telegram_id=None, responsible_username=None)
+    )
+    n = int(res.rowcount or 0)
+    if n:
+        logger.info(
+            "unassign_responsible_by_telegram: cleared %s orders (target=%s requester=%s)",
+            n,
+            target_telegram_id,
+            requester_telegram_id,
+        )
+    return {"unassigned": n}
 
 
 def _norm_username_for_responsible_match(value: str | None) -> str:

@@ -97,6 +97,26 @@ async def try_repair_responsible_telegram_self(telegram_id: int) -> None:
         logger.warning("repair_responsible_telegram_self failed: %s", e)
 
 
+async def unassign_responsible_orders_by_telegram(
+    *,
+    target_telegram_id: int,
+    requester_telegram_id: int,
+) -> int:
+    """Снять ответственного target_telegram_id со всех заявок (только запрос от admin)."""
+    url = f"{get_settings().BACKEND_URL}/orders/unassign-responsible-by-telegram"
+    params = {
+        "target_telegram_id": target_telegram_id,
+        "requester_telegram_id": requester_telegram_id,
+    }
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(url, params=params)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, dict) and data.get("unassigned") is not None:
+            return int(data["unassigned"])
+        return 0
+
+
 async def purge_trash_orders(
     requester_telegram_id: int,
     ids: list[int] | None = None,

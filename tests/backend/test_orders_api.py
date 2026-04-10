@@ -222,3 +222,36 @@ async def test_repair_responsible_telegram(client: AsyncClient, test_db_session:
     r2 = await client.get(f"/orders/{order.id}")
     assert r2.status_code == 200
     assert r2.json()["responsible_telegram_id"] == 555_555
+
+
+@pytest.mark.asyncio
+async def test_unassign_responsible_by_telegram(client: AsyncClient, test_db_session: AsyncSession):
+    adm = User(telegram_id=50, username="boss", role="admin")
+    auth = User(telegram_id=200, username="cli", role="user")
+    test_db_session.add_all([adm, auth])
+    await test_db_session.flush()
+    o = Order(
+        number="w-unas-tg",
+        author_id=auth.id,
+        status="в работе",
+        responsible_telegram_id=77,
+        responsible_username="gone",
+    )
+    test_db_session.add(o)
+    await test_db_session.commit()
+
+    r403 = await client.post(
+        "/orders/unassign-responsible-by-telegram",
+        params={"target_telegram_id": 77, "requester_telegram_id": 999},
+    )
+    assert r403.status_code == 403
+
+    r = await client.post(
+        "/orders/unassign-responsible-by-telegram",
+        params={"target_telegram_id": 77, "requester_telegram_id": 50},
+    )
+    assert r.status_code == 200
+    assert r.json()["unassigned"] == 1
+    r2 = await client.get(f"/orders/{o.id}")
+    assert r2.json()["responsible_telegram_id"] is None
+    assert r2.json().get("responsible_username") in (None, "")
