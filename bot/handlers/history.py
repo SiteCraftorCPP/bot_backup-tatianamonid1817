@@ -39,6 +39,7 @@ async def history_back(callback: CallbackQuery, state: FSMContext):
         full_orders = await fetch_history_full_orders_for_colors()
         user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
         aid = await active_admin_ids_frozen()
+        unorms = active_admin_username_norms_frozen(admins_tuples)
 
         # 1) Сначала откатываем фильтр по админу (к "Все админы")
         if selected_admin_id is not None:
@@ -59,6 +60,7 @@ async def history_back(callback: CallbackQuery, state: FSMContext):
                         user_to_index,
                         in_trash_list=(status_key == "trash"),
                         active_admin_ids=aid,
+                        active_admin_username_norms=unorms,
                     ),
                 )
                 for o in orders
@@ -115,6 +117,7 @@ async def history_back(callback: CallbackQuery, state: FSMContext):
                         user_to_index,
                         in_trash_list=False,
                         active_admin_ids=aid,
+                        active_admin_username_norms=unorms,
                     ),
                 )
                 for o in orders
@@ -228,32 +231,35 @@ def _history_order_row_caption(
     *,
     in_trash_list: bool = False,
     active_admin_ids: frozenset[int],
+    active_admin_username_norms: frozenset[str],
 ) -> str:
     """Подпись строки заявки в списке истории (статус + ответственный).
 
     Для корзины и любой заявки с deleted_at — только статус на момент удаления,
     без ответственного (полная карточка по «Подробнее» не меняется).
 
-    Ответственный, который не является действующим админом (демоут / блокировка),
-    в списке не показывается — только в «Подробнее».
+    Ответственный показываем только если telegram_id есть в списке админов из БД
+    (role=admin) или @username совпадает с таким админом. Снятый админ — только в «Подробнее».
     """
     resp = o.get("responsible_username") or ""
     status = o["status"]
     if in_trash_list or _is_order_soft_deleted(o):
         return status
     tid = o.get("responsible_telegram_id")
+    show = False
     if tid is not None:
         try:
             it = int(tid)
         except (TypeError, ValueError):
             return status
-        if it not in active_admin_ids:
-            return status
+        show = it in active_admin_ids
     elif resp:
+        show = _norm_username_key(resp) in active_admin_username_norms
+    if not show:
         return status
-    if not resp:
+    if not resp and tid is None:
         return status
-    label = _admin_color_label(o.get("responsible_telegram_id"), resp, user_to_index)
+    label = _admin_color_label(o.get("responsible_telegram_id"), resp or None, user_to_index)
     return f"{status} — {label}"
 
 
@@ -318,8 +324,17 @@ def _norm_username_key(username: str | None) -> str:
     return username.replace("\u00A0", " ").strip().lower()
 
 
+def active_admin_username_norms_frozen(
+    admins_tuples: list[tuple[int | None, str]],
+) -> frozenset[str]:
+    """Нормализованные @username действующих админов (как в фильтре истории)."""
+    return frozenset(
+        k for _, u in admins_tuples if (k := _norm_username_key(u))
+    )
+
+
 async def active_admin_telegram_ids() -> set[int]:
-    """Telegram_id действующих админов — только после перепроверки get_user (как PATCH /orders)."""
+    """Telegram_id действующих админов (role=admin в БД, см. _load_admins_tuples_raw)."""
     return {int(t) for t, _ in await _load_admins_tuples_raw()}
 
 
@@ -335,38 +350,42 @@ async def is_active_admin_id(telegram_id: int) -> bool:
 async def _load_admins_tuples_raw() -> list[tuple[int, str]]:
     """Собрать админов без дедупа по username.
 
-    Кандидаты: union(ADMIN_IDS, list_admins). Для каждого telegram_id — ровно один get_user;
-    в списке только role=admin (как PATCH /orders при назначении ответственного).
+    Источник истины — БД: GET /users?role=admin (list_admins). Демоут сразу исчезает из списка.
 
-    Так не остаются «призраки» из .env после удаления записи из БД и не тянется устаревший
-    username из ответа list_admins без сверки с актуальной ролью.
+    Дополнительно: id из ADMIN_IDS, которых ещё нет в ответе, проверяем через get_user
+    (на случай гонок/кэша; только при role=admin попадают в список).
     """
+    admins_by_tid: dict[int, str] = {}
+    try:
+        rows = await list_admins()
+    except Exception:  # noqa: BLE001
+        logger.exception("list_admins failed in _load_admins_tuples_raw")
+        rows = []
+    for a in rows or []:
+        tid = a.get("telegram_id")
+        if tid is None:
+            continue
+        try:
+            it = int(tid)
+        except (TypeError, ValueError):
+            continue
+        admins_by_tid[it] = str(a.get("username") or "").strip()
+
     settings = get_settings()
-    candidate_ids: set[int] = set()
     for x in settings.admin_ids_list:
         try:
-            candidate_ids.add(int(x))
+            it = int(x)
         except (TypeError, ValueError):
             continue
-    try:
-        admins_db = await list_admins()
-    except Exception:  # noqa: BLE001
-        admins_db = []
-    for a in admins_db or []:
-        try:
-            candidate_ids.add(int(a.get("telegram_id")))
-        except (TypeError, ValueError):
+        if it in admins_by_tid:
             continue
-
-    admins_by_tid: dict[int, str] = {}
-    for tid in sorted(candidate_ids):
         try:
-            u = await get_user(tid)
+            u = await get_user(it)
         except Exception:  # noqa: BLE001
             continue
         if not u or str(u.get("role") or "").strip() != "admin":
             continue
-        admins_by_tid[tid] = str(u.get("username") or "").strip()
+        admins_by_tid[it] = str(u.get("username") or "").strip()
 
     return list(admins_by_tid.items())
 
@@ -488,13 +507,18 @@ async def history_orders(message: Message, state: FSMContext):
     user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
     admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=None)
     aid = await active_admin_ids_frozen()
+    unorms = active_admin_username_norms_frozen(admins_tuples)
 
     items = [
         (
             o["id"],
             o["number"],
             _history_order_row_caption(
-                o, user_to_index, in_trash_list=False, active_admin_ids=aid
+                o,
+                user_to_index,
+                in_trash_list=False,
+                active_admin_ids=aid,
+                active_admin_username_norms=unorms,
             ),
         )
         for o in orders
@@ -556,6 +580,7 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
             collapse_others_when_selected=True,
         )
         aid = await active_admin_ids_frozen()
+        unorms = active_admin_username_norms_frozen(admins_tuples)
     except Exception as e:  # noqa: BLE001
         logger.exception("Get orders failed: %s", e)
         await callback.answer("Ошибка загрузки.", show_alert=True)
@@ -589,6 +614,7 @@ async def history_filters_menu(callback: CallbackQuery, state: FSMContext):
                     user_to_index,
                     in_trash_list=(status_key == "trash"),
                     active_admin_ids=aid,
+                    active_admin_username_norms=unorms,
                 ),
             )
             for o in orders
@@ -668,6 +694,7 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
             collapse_others_when_selected=True,
         )
         aid = await active_admin_ids_frozen()
+        unorms = active_admin_username_norms_frozen(admins_tuples)
     except Exception as e:  # noqa: BLE001
         logger.exception("Admin filter failed: %s", e)
         await callback.answer("Ошибка загрузки.", show_alert=True)
@@ -703,6 +730,7 @@ async def history_admin_filter(callback: CallbackQuery, state: FSMContext):
                     user_to_index,
                     in_trash_list=(status_key == "trash"),
                     active_admin_ids=aid,
+                    active_admin_username_norms=unorms,
                 ),
             )
             for o in orders
@@ -788,6 +816,7 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
             user_to_index, admin_labels = _build_user_color_mapping(full_orders, admins_tuples)
             admin_buttons = _build_admin_filter_buttons(admins_tuples, user_to_index, selected_admin_id=None)
             aid = await active_admin_ids_frozen()
+            unorms = active_admin_username_norms_frozen(admins_tuples)
             tw = _history_trash_inline_kw(
                 status_key, {**data, "trash_selected_ids": trash_selected_ids}
             )
@@ -821,6 +850,7 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
                             user_to_index,
                             in_trash_list=(status_key == "trash"),
                             active_admin_ids=aid,
+                            active_admin_username_norms=unorms,
                         ),
                     )
                     for o in orders
@@ -1001,6 +1031,7 @@ async def _history_redraw_current_list(callback: CallbackQuery, state: FSMContex
         collapse_others_when_selected=True,
     )
     aid = await active_admin_ids_frozen()
+    unorms = active_admin_username_norms_frozen(admins_tuples)
     tw = _history_trash_inline_kw(status_key, await state.get_data())
     title_cat = _pretty_status_key(status_key)
     start = page * ORDERS_PER_PAGE
@@ -1035,6 +1066,7 @@ async def _history_redraw_current_list(callback: CallbackQuery, state: FSMContex
                 user_to_index,
                 in_trash_list=(status_key == "trash"),
                 active_admin_ids=aid,
+                active_admin_username_norms=unorms,
             ),
         )
         for o in orders

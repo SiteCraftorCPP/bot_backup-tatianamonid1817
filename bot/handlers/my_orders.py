@@ -42,7 +42,11 @@ from bot.admin_my_orders_list import filter_admin_my_orders_rows, load_admin_my_
 from bot.keyboards import main_menu_kb, orders_list_inline, order_detail_back_kb
 from bot.notification_registry import notifications_registry
 from bot.handlers.main_menu import is_admin
-from bot.handlers.history import active_admin_ids_frozen
+from bot.handlers.history import (
+    active_admin_ids_frozen,
+    active_admin_username_norms_frozen,
+    _norm_username_key,
+)
 from backend.services.excel_service import (
     get_markznak_download_filename,
     get_order_excel_download_filename,
@@ -218,6 +222,7 @@ def _format_order_compact_html(
     adm: bool,
     user_to_index: dict | None,
     active_admin_ids: frozenset[int] | None = None,
+    active_admin_username_norms: frozenset[str] | None = None,
 ) -> str:
     shown_status = order["status"]
     if not adm:
@@ -230,7 +235,12 @@ def _format_order_compact_html(
         lines.append("<i>В корзине (удалена)</i>")
     resp = order.get("responsible_username")
     resp_id = order.get("responsible_telegram_id")
-    if adm and user_to_index is not None and active_admin_ids is not None:
+    if (
+        adm
+        and user_to_index is not None
+        and active_admin_ids is not None
+        and active_admin_username_norms is not None
+    ):
         from bot.handlers.history import _admin_color_label as _history_color_label
 
         tid_int: int | None = None
@@ -239,7 +249,12 @@ def _format_order_compact_html(
                 tid_int = int(resp_id)
             except (TypeError, ValueError):
                 tid_int = None
+        show_resp = False
         if tid_int is not None and tid_int in active_admin_ids:
+            show_resp = True
+        elif resp and _norm_username_key(resp) in active_admin_username_norms:
+            show_resp = True
+        if show_resp:
             lines.append(
                 f"Ответственный: {_history_color_label(resp_id, resp, user_to_index)}"
             )
@@ -365,8 +380,17 @@ async def _render_order_card(
         return
 
     adm = await is_admin(callback.from_user.id) if callback.from_user else False
-    user_to_index = await _load_admin_color_index() if adm else None
-    active_ids = await active_admin_ids_frozen() if adm else None
+    if adm:
+        user_to_index = await _load_admin_color_index()
+        from bot.handlers.history import _load_admins_tuples
+
+        admins_tuples_card = await _load_admins_tuples()
+        active_ids = await active_admin_ids_frozen()
+        unorms = active_admin_username_norms_frozen(admins_tuples_card)
+    else:
+        user_to_index = None
+        active_ids = None
+        unorms = None
 
     show_status_btns = adm
     uid = callback.from_user.id if callback.from_user else 0
@@ -381,6 +405,7 @@ async def _render_order_card(
         adm=adm,
         user_to_index=user_to_index,
         active_admin_ids=active_ids,
+        active_admin_username_norms=unorms,
     )
     markup = order_detail_back_kb(
         is_admin=show_status_btns,
@@ -643,6 +668,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                     admins_tuples, user_to_index, selected_admin_id=None
                 )
                 aid = await active_admin_ids_frozen()
+                unorms = active_admin_username_norms_frozen(admins_tuples)
                 items = [
                     (
                         o["id"],
@@ -652,6 +678,7 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                             user_to_index,
                             in_trash_list=(status_key == "trash"),
                             active_admin_ids=aid,
+                            active_admin_username_norms=unorms,
                         ),
                     )
                     for o in orders
@@ -697,12 +724,17 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                     admins_tuples, user_to_index, selected_admin_id=None
                 )
                 aid = await active_admin_ids_frozen()
+                unorms = active_admin_username_norms_frozen(admins_tuples)
                 items = [
                     (
                         o["id"],
                         o["number"],
                         _history_order_row_caption(
-                            o, user_to_index, in_trash_list=False, active_admin_ids=aid
+                            o,
+                            user_to_index,
+                            in_trash_list=False,
+                            active_admin_ids=aid,
+                            active_admin_username_norms=unorms,
                         ),
                     )
                     for o in orders
@@ -748,12 +780,17 @@ async def ord_list_back_to_main(callback: CallbackQuery, state: FSMContext):
                     admins_tuples, user_to_index, selected_admin_id=None
                 )
                 aid = await active_admin_ids_frozen()
+                unorms = active_admin_username_norms_frozen(admins_tuples)
                 items = [
                     (
                         o["id"],
                         o["number"],
                         _history_order_row_caption(
-                            o, user_to_index, in_trash_list=False, active_admin_ids=aid
+                            o,
+                            user_to_index,
+                            in_trash_list=False,
+                            active_admin_ids=aid,
+                            active_admin_username_norms=unorms,
                         ),
                     )
                     for o in orders
@@ -878,6 +915,7 @@ async def orders_page(callback: CallbackQuery, state: FSMContext):
             collapse_others_when_selected=True,
         )
         aid = await active_admin_ids_frozen()
+        unorms = active_admin_username_norms_frozen(admins_tuples)
         items = [
             (
                 o["id"],
@@ -887,6 +925,7 @@ async def orders_page(callback: CallbackQuery, state: FSMContext):
                     user_to_index,
                     in_trash_list=(status_key == "trash"),
                     active_admin_ids=aid,
+                    active_admin_username_norms=unorms,
                 ),
             )
             for o in orders
@@ -999,6 +1038,7 @@ async def change_order_status(callback: CallbackQuery, state: FSMContext):
     full_orders = await get_orders(admin=True, include_deleted=True, limit=100)
     user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
     aid = await active_admin_ids_frozen()
+    unorms = active_admin_username_norms_frozen(admins_tuples)
 
     # Уведомление автору при смене статуса
     try:
@@ -1022,7 +1062,11 @@ async def change_order_status(callback: CallbackQuery, state: FSMContext):
     await callback.bot.send_message(
         chat_id,
         _format_order_compact_html(
-            order, adm=True, user_to_index=user_to_index, active_admin_ids=aid
+            order,
+            adm=True,
+            user_to_index=user_to_index,
+            active_admin_ids=aid,
+            active_admin_username_norms=unorms,
         ),
         reply_markup=order_detail_back_kb(
             is_admin=True,
@@ -1538,10 +1582,15 @@ async def set_responsible(callback: CallbackQuery, state: FSMContext):
     full_orders = await get_orders(admin=True, include_deleted=True, limit=100)
     user_to_index, _ = _build_user_color_mapping(full_orders, admins_tuples)
     aid = await active_admin_ids_frozen()
+    unorms = active_admin_username_norms_frozen(admins_tuples)
 
     await callback.message.edit_text(
         _format_order_compact_html(
-            order, adm=True, user_to_index=user_to_index, active_admin_ids=aid
+            order,
+            adm=True,
+            user_to_index=user_to_index,
+            active_admin_ids=aid,
+            active_admin_username_norms=unorms,
         ),
         reply_markup=order_detail_back_kb(
             is_admin=True,
@@ -1845,6 +1894,7 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
         )
         tw = _history_trash_inline_kw(sf, data)
         aid = await active_admin_ids_frozen()
+        unorms = active_admin_username_norms_frozen(admins_tuples)
 
         items = [
             (
@@ -1855,6 +1905,7 @@ async def orders_list_back(callback: CallbackQuery, state: FSMContext):
                     user_to_index,
                     in_trash_list=(sf == "trash"),
                     active_admin_ids=aid,
+                    active_admin_username_norms=unorms,
                 ),
             )
             for o in orders
