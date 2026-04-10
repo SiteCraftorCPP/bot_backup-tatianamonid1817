@@ -42,7 +42,11 @@ from bot.admin_my_orders_list import filter_admin_my_orders_rows, load_admin_my_
 from bot.keyboards import main_menu_kb, orders_list_inline, order_detail_back_kb
 from bot.notification_registry import notifications_registry
 from bot.handlers.main_menu import is_admin
-from bot.handlers.history import active_admin_ids_frozen, active_admin_username_norms_frozen
+from bot.handlers.history import (
+    active_admin_ids_frozen,
+    active_admin_username_norms_frozen,
+    _strip_responsible_username_display_suffix,
+)
 from backend.services.excel_service import (
     get_markznak_download_filename,
     get_order_excel_download_filename,
@@ -259,10 +263,10 @@ def _format_order_details_html(order: dict) -> str:
             if sent_line and sent_line != "—":
                 parts.append(f"Дата отправки: {html.escape(sent_line)}")
     parts.append(f"Создал: {author}")
-    resp = order.get("responsible_username")
+    resp = _strip_responsible_username_display_suffix(order.get("responsible_username"))
     resp_id = order.get("responsible_telegram_id")
     if resp or resp_id is not None:
-        rlabel = f"@{resp}" if resp else str(resp_id or "")
+        rlabel = f"@{resp.lstrip('@')}" if resp else str(resp_id or "")
         parts.append(f"Ответственный: {html.escape(rlabel)}")
     else:
         parts.append("Ответственный: не назначен")

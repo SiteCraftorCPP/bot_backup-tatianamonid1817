@@ -1,6 +1,7 @@
 """History of orders - admin only."""
 import hashlib
 import logging
+import re
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -299,6 +300,17 @@ def _user_key(telegram_id: int | None, username: str | None) -> str:
     return str(telegram_id or "")
 
 
+def _strip_responsible_username_display_suffix(raw: str | None) -> str | None:
+    """Убрать хвост вида « · id 123456» из username (если когда-то попал в поле целиком)."""
+    if not raw:
+        return None
+    s = str(raw).replace("\u00A0", " ").strip()
+    if not s:
+        return None
+    s = re.sub(r"\s*[·•]\s*id\s*\d+\s*$", "", s, flags=re.IGNORECASE).strip()
+    return s or None
+
+
 def _stable_color_index_for_user_key(user_key: str) -> int:
     """Индекс цвета от ключа: не меняется при демоуте (в отличие от позиции в списке админов)."""
     if not user_key:
@@ -314,6 +326,7 @@ def _admin_color_label(
 ) -> str:
     """Цветной кружок + username/id. Цвет стабилен по _user_key (MD5), не от порядка в списке админов."""
     del user_to_index
+    username = _strip_responsible_username_display_suffix(username)
     if not telegram_id and not username:
         return ""
     main = f"@{username}" if username else str(telegram_id or "")
