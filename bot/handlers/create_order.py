@@ -197,7 +197,7 @@ async def process_legal_entity(callback: CallbackQuery, state: FSMContext):
     if brands:
         await callback.message.answer("Выберите бренд:", reply_markup=brands_kb(brands))
     else:
-        await callback.message.answer("Введите бренд:")
+        await callback.message.answer("Введите бренд:", reply_markup=back_kb())
     await state.set_state("create_order:new_brand")
     await callback.answer()
 

@@ -449,7 +449,9 @@ async def template_legal_entity_select(callback: CallbackQuery, state: FSMContex
     if brands:
         await callback.message.answer("Выберите бренд:", reply_markup=brands_kb(brands))
     else:
-        await callback.message.answer("Введите бренд:")
+        # Если справочник брендов пуст/недоступен, даём ввод вручную и показываем «Назад»,
+        # чтобы не оставалась старая клавиатура предыдущего шага.
+        await callback.message.answer("Введите бренд:", reply_markup=back_kb())
     await state.set_state("template:new_brand")
     await callback.answer()
 
