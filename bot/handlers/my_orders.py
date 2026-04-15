@@ -154,7 +154,7 @@ async def _show_my_orders_list_for_user(
 
     if is_adm:
         items = [(o["id"], o["number"], o["status"]) for o in orders]
-        title_base = "Ваши заявки (все назначенные на вас):\n\nВыберите заявку:"
+        title_base = "Ваши заявки:\n\nВыберите заявку:"
     else:
         items = [
             (o["id"], o["number"], _user_visible_status(o["status"])) for o in orders

@@ -40,6 +40,7 @@ from bot.api_client import (
 )
 from config import get_settings
 from bot.notification_registry import notifications_registry
+from bot.order_notifier import notify_order_to_admins
 from backend.services.excel_service import (
     get_markznak_download_filename,
     get_order_excel_download_filename,
@@ -361,67 +362,11 @@ async def process_new_template_file(message: Message, state: FSMContext):
     )
     settings = get_settings()
     try:
-        excel_bytes = await get_markznak_order_excel(order["id"])
-        import tempfile
-        import os
-
-        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
-            f.write(excel_bytes)
-            tmp_path = f.name
-        try:
-            admin_ids = await admin_telegram_ids_for_notify()
-            doc_out = FSInputFile(
-                tmp_path, filename=get_markznak_download_filename(order["number"])
-            )
-            caption_lines = [
-                f"Новая заявка № {order['number']} (новый товар)",
-                f"Создал: @{user.username or 'user'}",
-                f"Количество кодов: {codes_total}",
-            ]
-            if order.get("comment"):
-                caption_lines.append(f"Комментарий: {order['comment']}")
-            caption = "\n".join(caption_lines)
-            markup = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="Взять в работу",
-                            callback_data=f"take:{order['id']}",
-                        )
-                    ]
-                ]
-            )
-            for admin_id in admin_ids:
-                try:
-                    sent = await message.bot.send_document(
-                        chat_id=admin_id,
-                        document=doc_out,
-                        caption=caption,
-                        reply_markup=markup,
-                    )
-                    notifications_registry.add(
-                        order_id=order["id"],
-                        chat_id=sent.chat.id,
-                        message_id=sent.message_id,
-                        is_document=True,
-                        file_id=sent.document.file_id if sent.document else None,
-                    )
-                    try:
-                        await register_order_telegram_posting(
-                            order["id"], sent.chat.id, sent.message_id
-                        )
-                    except Exception as reg_err:
-                        logger.warning(
-                            "register_order_telegram_posting order=%s: %s",
-                            order["id"],
-                            reg_err,
-                        )
-                except Exception as e:
-                    logger.exception("Send to admin %s failed: %s", admin_id, e)
-        finally:
-            os.unlink(tmp_path)
+        # Надёжная доставка: документ + fallback на текст, плюс фоновые ретраи
+        # (WORK_CHAT_ID может быть не задан — тогда канал только админы).
+        await notify_order_to_admins(message.bot, order)
     except Exception as e:
-        logger.exception("Send to work chat (new-template) failed: %s", e)
+        logger.exception("Notify admins about new order failed: %s", e)
     await state.clear()
     await message.answer(
         f"Заявка № {order['number']} создана. Количество кодов: {codes_total}.",

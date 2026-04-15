@@ -12,6 +12,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import get_settings
 from bot.handlers import router
 from bot.middleware import LoggingMiddleware, AccessMiddleware
+from bot.order_notifier import retry_loop as _orders_retry_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,11 +47,16 @@ async def main():
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        retry_task = asyncio.create_task(_orders_retry_loop(bot, interval_sec=60))
         await dp.start_polling(bot)
     except asyncio.CancelledError:
         # Нормальная отмена при остановке polling (Ctrl+C / SIGTERM)
         logger.info("Polling остановлен.")
     finally:
+        try:
+            retry_task.cancel()
+        except Exception:
+            pass
         await bot.session.close()
 
 

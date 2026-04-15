@@ -44,8 +44,10 @@ from bot.api_client import (
     set_order_comment,
     register_order_telegram_posting,
 )
+from config import get_settings
 from bot.notification_registry import notifications_registry
 from backend.services.excel_service import get_markznak_download_filename
+from bot.order_notifier import notify_order_to_admins
 
 router = Router()
 
@@ -232,7 +234,7 @@ async def _send_markznak_to_admins(
     author_full_name: str | None = None,
     author_id: int | None = None,
 ) -> None:
-    """Сформировать файл МаркЗнак по заявке и отправить всем администраторам."""
+    """Сформировать файл МаркЗнак по заявке и отправить админам (fallback на текст)."""
     admin_ids = await admin_telegram_ids_for_notify()
     try:
         from aiogram.types import FSInputFile
@@ -297,6 +299,8 @@ async def _send_markznak_to_admins(
                     ]
                 ]
             )
+
+            # Лички админам
             for admin_id in admin_ids:
                 try:
                     sent = await message.bot.send_document(
@@ -799,13 +803,23 @@ async def process_template_file(message: Message, state: FSMContext):
     tf = data.get("template_flow")
     if not tf:
         tf = "repeat" if data.get("article") else "new"
+
+    # ВАЖНО: сразу отправляем карточку заявки админам,
+    # чтобы она появлялась в группе даже если пользователь дальше не завершит шаги комментария/доп. файлов.
+    try:
+        await notify_order_to_admins(message.bot, order)
+        markznak_sent_now = True
+    except Exception as e:
+        logger.exception("Immediate notify after template create failed: %s", e)
+        markznak_sent_now = False
+
     await state.update_data(
         order_id=order["id"],
         order_number=order["number"],
         order_items_count=len(order.get("items", [])),
         order_codes_total=codes_total,
         template_flow=tf,
-        markznak_sent=False,
+        markznak_sent=markznak_sent_now,
         author_username=user.username,
         author_full_name=user.full_name,
         author_id=user.id,
