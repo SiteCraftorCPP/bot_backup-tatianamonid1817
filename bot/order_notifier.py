@@ -14,7 +14,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaDocument,
+    InputMediaPhoto,
+)
 
 from bot.api_client import (
     admin_telegram_ids_for_notify,
@@ -36,6 +42,49 @@ def _is_photo_filename(file_name: str | None) -> bool:
     if not file_name:
         return False
     return str(file_name).strip().lower().endswith(_PHOTO_EXTS)
+
+
+async def _send_extras_as_albums(bot, *, chat_id: int, extras: list[dict]) -> None:
+    """Send extra attachments grouped: documents together, photos together (Telegram limitation)."""
+    docs: list[dict] = []
+    photos: list[dict] = []
+    for att in extras or []:
+        fid = att.get("telegram_file_id")
+        if not fid:
+            continue
+        fn = att.get("file_name")
+        if _is_photo_filename(fn):
+            photos.append(att)
+        else:
+            docs.append(att)
+
+    async def _send_docs_group(chunk: list[dict]) -> None:
+        if not chunk:
+            return
+        if len(chunk) == 1:
+            await bot.send_document(chat_id=chat_id, document=chunk[0]["telegram_file_id"])
+            return
+        media = [InputMediaDocument(media=a["telegram_file_id"]) for a in chunk]
+        await bot.send_media_group(chat_id=chat_id, media=media)
+
+    async def _send_photos_group(chunk: list[dict]) -> None:
+        if not chunk:
+            return
+        if len(chunk) == 1:
+            await bot.send_photo(chat_id=chat_id, photo=chunk[0]["telegram_file_id"])
+            return
+        media = [InputMediaPhoto(media=a["telegram_file_id"]) for a in chunk]
+        await bot.send_media_group(chat_id=chat_id, media=media)
+
+    # Telegram: media_group max 10 items
+    i = 0
+    while i < len(docs):
+        await _send_docs_group(docs[i : i + 10])
+        i += 10
+    i = 0
+    while i < len(photos):
+        await _send_photos_group(photos[i : i + 10])
+        i += 10
 
 
 def _load_pending_ids() -> list[int]:
@@ -206,25 +255,16 @@ async def notify_order_to_admins(bot, order: dict) -> NotifyResult:
                     reg_err,
                 )
 
-            # Send extra attachments (if any) after the main card.
-            for att in extras:
-                fid = att.get("telegram_file_id")
-                if not fid:
-                    continue
-                fn = att.get("file_name") or "файл"
-                try:
-                    if _is_photo_filename(fn):
-                        await bot.send_photo(chat_id=admin_id, photo=fid)
-                    else:
-                        await bot.send_document(chat_id=admin_id, document=fid)
-                except Exception as e:  # noqa: BLE001
-                    logger.exception(
-                        "Send extra attachment failed admin_id=%s order_id=%s file=%s: %s",
-                        admin_id,
-                        order_id,
-                        fn,
-                        e,
-                    )
+            # Send extra attachments grouped (docs album, photos album).
+            try:
+                await _send_extras_as_albums(bot, chat_id=admin_id, extras=extras)
+            except Exception as e:  # noqa: BLE001
+                logger.exception(
+                    "Send extras albums failed admin_id=%s order_id=%s: %s",
+                    admin_id,
+                    order_id,
+                    e,
+                )
         except Exception as e:  # noqa: BLE001
             failed_to += 1
             # Fallback: if document send failed, try text.
@@ -253,25 +293,16 @@ async def notify_order_to_admins(bot, order: dict) -> NotifyResult:
                         reg_err,
                     )
 
-                # Even in fallback mode, still try to send extras.
-                for att in extras:
-                    fid = att.get("telegram_file_id")
-                    if not fid:
-                        continue
-                    fn = att.get("file_name") or "файл"
-                    try:
-                        if _is_photo_filename(fn):
-                            await bot.send_photo(chat_id=admin_id, photo=fid)
-                        else:
-                            await bot.send_document(chat_id=admin_id, document=fid)
-                    except Exception as e:  # noqa: BLE001
-                        logger.exception(
-                            "Send extra attachment failed (fallback) admin_id=%s order_id=%s file=%s: %s",
-                            admin_id,
-                            order_id,
-                            fn,
-                            e,
-                        )
+                # Even in fallback mode, still try to send extras grouped.
+                try:
+                    await _send_extras_as_albums(bot, chat_id=admin_id, extras=extras)
+                except Exception as e:  # noqa: BLE001
+                    logger.exception(
+                        "Send extras albums failed (fallback) admin_id=%s order_id=%s: %s",
+                        admin_id,
+                        order_id,
+                        e,
+                    )
             except Exception as e2:  # noqa: BLE001
                 logger.exception("Notify admin failed admin_id=%s order_id=%s: %s / %s", admin_id, order_id, e, e2)
 
