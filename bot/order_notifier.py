@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 
 _PENDING_PATH = Path(__file__).resolve().parent / "pending_notifications.json"
 
+_PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+
+
+def _is_photo_filename(file_name: str | None) -> bool:
+    if not file_name:
+        return False
+    return str(file_name).strip().lower().endswith(_PHOTO_EXTS)
+
 
 def _load_pending_ids() -> list[int]:
     try:
@@ -138,6 +146,7 @@ async def notify_order_to_admins(bot, order: dict) -> NotifyResult:
     order_number = str(order.get("number") or "")
     caption = _caption_from_order(order)
     markup = _take_markup(order_id)
+    extras = list(order.get("extra_attachments") or [])
 
     try:
         admin_ids = await admin_telegram_ids_for_notify()
@@ -196,6 +205,26 @@ async def notify_order_to_admins(bot, order: dict) -> NotifyResult:
                     admin_id,
                     reg_err,
                 )
+
+            # Send extra attachments (if any) after the main card.
+            for att in extras:
+                fid = att.get("telegram_file_id")
+                if not fid:
+                    continue
+                fn = att.get("file_name") or "файл"
+                try:
+                    if _is_photo_filename(fn):
+                        await bot.send_photo(chat_id=admin_id, photo=fid)
+                    else:
+                        await bot.send_document(chat_id=admin_id, document=fid)
+                except Exception as e:  # noqa: BLE001
+                    logger.exception(
+                        "Send extra attachment failed admin_id=%s order_id=%s file=%s: %s",
+                        admin_id,
+                        order_id,
+                        fn,
+                        e,
+                    )
         except Exception as e:  # noqa: BLE001
             failed_to += 1
             # Fallback: if document send failed, try text.
@@ -223,6 +252,26 @@ async def notify_order_to_admins(bot, order: dict) -> NotifyResult:
                         admin_id,
                         reg_err,
                     )
+
+                # Even in fallback mode, still try to send extras.
+                for att in extras:
+                    fid = att.get("telegram_file_id")
+                    if not fid:
+                        continue
+                    fn = att.get("file_name") or "файл"
+                    try:
+                        if _is_photo_filename(fn):
+                            await bot.send_photo(chat_id=admin_id, photo=fid)
+                        else:
+                            await bot.send_document(chat_id=admin_id, document=fid)
+                    except Exception as e:  # noqa: BLE001
+                        logger.exception(
+                            "Send extra attachment failed (fallback) admin_id=%s order_id=%s file=%s: %s",
+                            admin_id,
+                            order_id,
+                            fn,
+                            e,
+                        )
             except Exception as e2:  # noqa: BLE001
                 logger.exception("Notify admin failed admin_id=%s order_id=%s: %s / %s", admin_id, order_id, e, e2)
 
