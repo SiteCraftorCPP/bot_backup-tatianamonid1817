@@ -40,7 +40,7 @@ from bot.api_client import (
 )
 from config import get_settings
 from bot.notification_registry import notifications_registry
-from bot.order_notifier import notify_order_to_admins
+from bot.order_notifier import enqueue_pending, notify_order_to_admins
 from backend.services.excel_service import (
     get_markznak_download_filename,
     get_order_excel_download_filename,
@@ -364,9 +364,15 @@ async def process_new_template_file(message: Message, state: FSMContext):
     try:
         # Надёжная доставка: документ + fallback на текст, плюс фоновые ретраи
         # (WORK_CHAT_ID может быть не задан — тогда канал только админы).
-        await notify_order_to_admins(message.bot, order)
+        res = await notify_order_to_admins(message.bot, order)
+        if not res.delivered_any:
+            enqueue_pending(int(order["id"]))
     except Exception as e:
         logger.exception("Notify admins about new order failed: %s", e)
+        try:
+            enqueue_pending(int(order["id"]))
+        except Exception:
+            pass
     await state.clear()
     await message.answer(
         f"Заявка № {order['number']} создана. Количество кодов: {codes_total}.",

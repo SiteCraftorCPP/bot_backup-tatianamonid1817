@@ -8,22 +8,91 @@ Also supports periodic retry for orders in status "создана" that have no 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.api_client import (
     admin_telegram_ids_for_notify,
     get_markznak_order_excel,
-    get_orders,
-    list_order_telegram_postings,
+    get_order,
     register_order_telegram_posting,
 )
 from bot.notification_registry import notifications_registry
 from backend.services.excel_service import get_markznak_download_filename
 
 logger = logging.getLogger(__name__)
+
+_PENDING_PATH = Path(__file__).resolve().parent / "pending_notifications.json"
+
+
+def _load_pending_ids() -> list[int]:
+    try:
+        if not _PENDING_PATH.exists():
+            return []
+        raw = _PENDING_PATH.read_text(encoding="utf-8").strip()
+        if not raw:
+            return []
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            ids = data.get("order_ids") or []
+        else:
+            ids = data or []
+        out: list[int] = []
+        for x in ids:
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        # uniq keep order
+        seen: set[int] = set()
+        uniq: list[int] = []
+        for oid in out:
+            if oid in seen:
+                continue
+            seen.add(oid)
+            uniq.append(oid)
+        return uniq
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to load pending notifications: %s", e)
+        return []
+
+
+def _save_pending_ids(order_ids: list[int]) -> None:
+    try:
+        payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "order_ids": order_ids,
+        }
+        _PENDING_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Failed to save pending notifications: %s", e)
+
+
+def enqueue_pending(order_id: int) -> None:
+    """Queue a confirmed order_id for retry delivery (so nothing is lost)."""
+    try:
+        oid = int(order_id)
+    except (TypeError, ValueError):
+        return
+    ids = _load_pending_ids()
+    if oid in ids:
+        return
+    ids.append(oid)
+    _save_pending_ids(ids)
+
+
+def dequeue_pending(order_id: int) -> None:
+    try:
+        oid = int(order_id)
+    except (TypeError, ValueError):
+        return
+    ids = [x for x in _load_pending_ids() if x != oid]
+    _save_pending_ids(ids)
 
 
 def _take_markup(order_id: int) -> InlineKeyboardMarkup:
@@ -161,27 +230,27 @@ async def notify_order_to_admins(bot, order: dict) -> NotifyResult:
 
 
 async def retry_loop(bot, *, interval_sec: int = 60) -> None:
-    """Periodically retry notifications for orders in status 'создана' with no telegram postings."""
+    """Periodically retry notifications for confirmed orders from local pending queue."""
     while True:
         try:
-            try:
-                orders = await get_orders(admin=True, status="создана", limit=100)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("retry_loop get_orders failed: %s", e)
-                orders = []
-
-            for o in orders:
-                oid = int(o.get("id") or 0)
-                if not oid:
-                    continue
+            pending = _load_pending_ids()
+            if not pending:
+                await asyncio.sleep(interval_sec)
+                continue
+            # Process a snapshot (avoid long lock if file changes)
+            for oid in list(pending)[:50]:
                 try:
-                    postings = await list_order_telegram_postings(oid)
-                except Exception:
-                    postings = []
-                if postings:
+                    order = await get_order(int(oid))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("retry_loop get_order(%s) failed: %s", oid, e)
                     continue
-                # No postings => try to deliver now
-                await notify_order_to_admins(bot, o)
+                if not order:
+                    # Removed from backend => drop from queue
+                    dequeue_pending(int(oid))
+                    continue
+                res = await notify_order_to_admins(bot, order)
+                if res.delivered_any:
+                    dequeue_pending(int(oid))
         except Exception as e:  # noqa: BLE001
             logger.exception("retry_loop cycle failed: %s", e)
         await asyncio.sleep(interval_sec)

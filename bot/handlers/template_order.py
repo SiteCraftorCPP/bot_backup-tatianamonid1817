@@ -47,7 +47,7 @@ from bot.api_client import (
 from config import get_settings
 from bot.notification_registry import notifications_registry
 from backend.services.excel_service import get_markznak_download_filename
-from bot.order_notifier import notify_order_to_admins
+from bot.order_notifier import enqueue_pending, notify_order_to_admins
 
 router = Router()
 
@@ -804,22 +804,14 @@ async def process_template_file(message: Message, state: FSMContext):
     if not tf:
         tf = "repeat" if data.get("article") else "new"
 
-    # ВАЖНО: сразу отправляем карточку заявки админам,
-    # чтобы она появлялась в группе даже если пользователь дальше не завершит шаги комментария/доп. файлов.
-    try:
-        await notify_order_to_admins(message.bot, order)
-        markznak_sent_now = True
-    except Exception as e:
-        logger.exception("Immediate notify after template create failed: %s", e)
-        markznak_sent_now = False
-
     await state.update_data(
         order_id=order["id"],
         order_number=order["number"],
         order_items_count=len(order.get("items", [])),
         order_codes_total=codes_total,
         template_flow=tf,
-        markznak_sent=markznak_sent_now,
+        # Отправка админам должна происходить только после опросника/подтверждения.
+        markznak_sent=False,
         author_username=user.username,
         author_full_name=user.full_name,
         author_id=user.id,
@@ -910,21 +902,24 @@ async def _finalize_order_with_comment(message: Message, state: FSMContext) -> N
     markznak_sent = data.get("markznak_sent")
 
     if order_id and order_number and not markznak_sent:
-        codes_total = int(data.get("order_codes_total") or items_count or 0)
-        tf = data.get("template_flow")
-        if tf not in ("new", "repeat"):
-            tf = "repeat" if data.get("article") else "new"
-        await _send_markznak_to_admins(
-            message=message,
-            order_id=order_id,
-            order_number=order_number,
-            codes_total=codes_total,
-            comment=data.get("comment"),
-            template_flow=tf,
-            author_username=data.get("author_username"),
-            author_full_name=data.get("author_full_name"),
-            author_id=data.get("author_id"),
-        )
+        # Финальная отправка админам только после подтверждения.
+        try:
+            from bot.api_client import get_order as _get_order
+
+            full = await _get_order(int(order_id))
+        except Exception as e:
+            logger.exception("Finalize: get_order failed: %s", e)
+            full = None
+        if full:
+            try:
+                res = await notify_order_to_admins(message.bot, full)
+                if not res.delivered_any:
+                    enqueue_pending(int(order_id))
+            except Exception as e:
+                logger.exception("Finalize: notify_order_to_admins failed: %s", e)
+                enqueue_pending(int(order_id))
+        else:
+            enqueue_pending(int(order_id))
         await state.update_data(markznak_sent=True)
 
     await state.clear()
