@@ -911,7 +911,7 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
                 raw = await load_admin_my_orders_source(user_id)
                 orders = filter_admin_my_orders_rows(raw, status)
                 filter_mode = "my_admin"
-                title_base = "Ваши заявки (все назначенные на вас)"
+                title_base = "Ваши заявки"
             else:
                 # «Мои заявки» для пользователя: авторские заявки.
                 if status is None:
@@ -943,9 +943,13 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
                 filter_mode = "my_user"
                 title_base = "Ваши заявки"
             if not orders:
-                status_label = status or "все"
+                if is_admin_in_my:
+                    empty_title = "Ваши заявки:\n\nЗаявок не найдено."
+                else:
+                    status_label = status or "все"
+                    empty_title = f"{title_base} ({status_label}):\n\nЗаявок не найдено."
                 await callback.message.edit_text(
-                    f"{title_base} ({status_label}):\n\nЗаявок не найдено.",
+                    empty_title,
                     reply_markup=orders_list_inline(
                         [],
                         page=0,
@@ -966,11 +970,10 @@ async def _orders_filter_impl(callback: CallbackQuery, state: FSMContext, *, sta
                         for o in orders
                     ]
                 has_next = len(orders) > ORDERS_PER_PAGE
-                title = (
-                    f"{title_base} ({status or 'все'}):\n\nВыберите заявку:"
-                    if is_admin_in_my
-                    else "Ваши заявки:\n\nВыберите заявку для просмотра:"
-                )
+                if is_admin_in_my:
+                    title = "Ваши заявки:\n\nВыберите заявку:"
+                else:
+                    title = "Ваши заявки:\n\nВыберите заявку для просмотра:"
                 await callback.message.edit_text(
                     title,
                     reply_markup=orders_list_inline(
