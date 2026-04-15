@@ -205,7 +205,15 @@ async def fetch_history_orders_list(
         kw = {"admin": True, "include_deleted": True, "limit": 100}
         if admin_filter_id is not None:
             kw["responsible_telegram_id"] = admin_filter_id
-        return await get_orders(**kw)
+        rows = await get_orders(**kw)
+        # В разделе «Все» не показываем «отправлена»: после отправки заявка должна
+        # исчезать отсюда и оставаться только в разделе «Отправлена».
+        # При этом заявки в корзине (deleted_at) показываем независимо от статуса.
+        return [
+            o
+            for o in rows
+            if _is_order_soft_deleted(o) or (str(o.get("status") or "").strip() != "отправлена")
+        ]
     kw = {"admin": True, "status": status_key, "limit": 100}
     if admin_filter_id is not None:
         kw["responsible_telegram_id"] = admin_filter_id
