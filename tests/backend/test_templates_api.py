@@ -132,6 +132,66 @@ async def test_create_order_from_template_happy_path(client: AsyncClient, test_d
 
 
 @pytest.mark.asyncio
+async def test_create_order_from_template_persists_ms_in_markznak(
+    client: AsyncClient, test_db_session: AsyncSession,
+):
+    """Номер заказа МС из колонки пользовательского шаблона попадает в Excel МаркЗнак для админа."""
+    base_kwargs = dict(
+        name="Тест, арт. MS-ART-1",
+        brand="Brand",
+        color="red",
+        tnved_code="6204623100",
+        composition="100% хлопок",
+        country="Киргизия",
+        target_gender="ЖЕНСКИЙ",
+        category="ДЖИНСЫ",
+        legal_entity="Акс Кэпитал",
+    )
+    test_db_session.add(Product(article="MS-ART-1", size="M", **base_kwargs))
+    await test_db_session.commit()
+
+    resp = await client.get("/products/template", params={"article": "MS-ART-1"})
+    assert resp.status_code == 200
+    wb = load_workbook(io.BytesIO(resp.content))
+    ws = wb.active
+    # Колонка L — «Номер заказа МС» в одежде
+    ws.cell(row=2, column=1, value=1)
+    ws.cell(row=2, column=12, value="MS-LINE-999")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    files = {
+        "file": (
+            "template.xlsx",
+            buf.getvalue(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    }
+    data = {
+        "author_telegram_id": "333",
+        "author_username": "msuser",
+        "author_full_name": "MS Test",
+    }
+
+    resp2 = await client.post("/orders/from_template", data=data, files=files)
+    assert resp2.status_code == 200, resp2.text
+    order = resp2.json()
+    assert order["items"][0].get("ms_order_number") == "MS-LINE-999"
+    assert order.get("ms_order_number") == "MS-LINE-999"
+
+    oid = order["id"]
+    r3 = await client.get(f"/orders/{oid}/markznak_excel")
+    assert r3.status_code == 200
+    wb2 = load_workbook(io.BytesIO(r3.content))
+    ws2 = wb2.active
+    headers = [ws2.cell(row=1, column=c).value for c in range(1, ws2.max_column + 1)]
+    col_ms = next(i + 1 for i, h in enumerate(headers) if h == "Номер заказа МС")
+    assert ws2.cell(row=2, column=col_ms).value == "MS-LINE-999"
+
+
+@pytest.mark.asyncio
 async def test_create_order_from_template_respects_brand_and_legal_entity(
     client: AsyncClient,
     test_db_session: AsyncSession,

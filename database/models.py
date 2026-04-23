@@ -150,7 +150,9 @@ class OrderItem(Base):
     country: Mapped[str | None] = mapped_column(String(200), nullable=True)
     target_gender: Mapped[str | None] = mapped_column(String(50), nullable=True)
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    
+    # Номер заказа МС из строки пользовательского шаблона (может отличаться по строкам)
+    ms_order_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
     order: Mapped["Order"] = relationship("Order", back_populates="items")
     product: Mapped["Product | None"] = relationship("Product", back_populates="order_items")
 

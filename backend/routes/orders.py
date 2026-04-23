@@ -70,9 +70,12 @@ def _order_item_create_from_template_row(
 ) -> OrderItemCreate:
     """Собрать позицию с учётом лимитов полей order_items."""
     qty = int(r["quantity"])
+    line_ms = _clip_str(r.get("ms_order_number"), 100)
     if product:
         sz = product.size or _clip_str(r.get("size"), 20) or ""
-        return OrderItemCreate(product_id=product.id, size=sz, quantity=qty)
+        return OrderItemCreate(
+            product_id=product.id, size=sz, quantity=qty, ms_order_number=line_ms
+        )
     return OrderItemCreate(
         size=_clip_str(r.get("size"), 20) or "",
         quantity=qty,
@@ -86,6 +89,7 @@ def _order_item_create_from_template_row(
         country=_clip_str(r.get("country"), 200),
         target_gender=_clip_str(r.get("target_gender"), 50),
         category=_clip_str(r.get("item_type"), 100),
+        ms_order_number=line_ms,
     )
 
 
@@ -157,6 +161,8 @@ async def create_order(
             item.country = item_data.country
             item.target_gender = item_data.target_gender
             item.category = item_data.category
+        if item_data.ms_order_number is not None:
+            item.ms_order_number = _clip_str(item_data.ms_order_number, 100)
         
         db.add(item)
     
@@ -607,12 +613,24 @@ async def create_order_from_template(
                 product = final_candidates[0]
 
         items.append(_order_item_create_from_template_row(r, product))
+
+    # Номер МС в шаблоне задаётся по строкам; на уровне заявки — из формы или
+    # если во всех строках один и тот же (для списков/отчётов).
+    merged_order_ms = _clip_str(ms_order_number, 100)
+    if not merged_order_ms:
+        distinct_line_ms = {
+            _clip_str(r.get("ms_order_number"), 100) for r in rows
+        }
+        distinct_line_ms = {d for d in distinct_line_ms if d}
+        if len(distinct_line_ms) == 1:
+            merged_order_ms = next(iter(distinct_line_ms))
+
     data = OrderCreate(
         author_telegram_id=author_telegram_id,
         author_username=_clip_str(author_username, 255),
         author_full_name=_clip_str(author_full_name, 255),
         order_type=_clip_str(order_type, 50),
-        ms_order_number=_clip_str(ms_order_number, 100),
+        ms_order_number=merged_order_ms,
         comment=comment,
         items=items,
     )
@@ -1124,7 +1142,7 @@ async def download_markznak_order_excel(
             if product
             else None,
             "signed": getattr(product, "signed", None) if product else None,
-            "ms_order_number": order.ms_order_number,
+            "ms_order_number": (i.ms_order_number or order.ms_order_number),
             "created_at": order.created_at,
         }
         items.append(d)

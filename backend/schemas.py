@@ -38,6 +38,7 @@ class OrderItemCreate(BaseModel):
     country: Optional[str] = None
     target_gender: Optional[str] = None
     category: Optional[str] = None
+    ms_order_number: Optional[str] = None
 
 
 class OrderCreate(BaseModel):
@@ -88,6 +89,7 @@ class OrderItemResponse(BaseModel):
     legal_entity: Optional[str] = None
     brand: Optional[str] = None
     composition: Optional[str] = None
+    ms_order_number: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

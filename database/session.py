@@ -41,6 +41,30 @@ def _sqlite_ensure_orders_deleted_at(connection: Connection) -> None:
     except Exception:
         logger.warning("SQLite: не удалось создать индекс ix_orders_deleted_at", exc_info=True)
 
+
+def _sqlite_ensure_order_items_ms_order_number(connection: Connection) -> None:
+    """Старые SQLite-файлы без order_items.ms_order_number."""
+    try:
+        exists = connection.execute(
+            text(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='order_items' LIMIT 1"
+            )
+        ).first()
+        if not exists:
+            return
+        info = connection.execute(text("PRAGMA table_info(order_items)"))
+        col_names = {row[1] for row in info}
+        if "ms_order_number" in col_names:
+            return
+        connection.execute(
+            text("ALTER TABLE order_items ADD COLUMN ms_order_number VARCHAR(100)")
+        )
+        logger.info("SQLite: добавлена колонка order_items.ms_order_number")
+    except Exception:
+        logger.exception("SQLite: не удалось добавить order_items.ms_order_number")
+        raise
+
+
 db_url = (
     settings.TEST_DATABASE_URL
     if getattr(settings, "TEST_MODE", False) and settings.TEST_DATABASE_URL
@@ -88,3 +112,4 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
         if "sqlite" in db_url:
             await conn.run_sync(_sqlite_ensure_orders_deleted_at)
+            await conn.run_sync(_sqlite_ensure_order_items_ms_order_number)
