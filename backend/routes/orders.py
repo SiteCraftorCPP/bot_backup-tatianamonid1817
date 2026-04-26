@@ -572,45 +572,10 @@ async def create_order_from_template(
                 if (best_score, best_gtin) > (second_score, second_gtin) and best_score > 0:
                     product = best
 
-        # 7) Последний SQL fallback: иногда размер в шаблоне может отличаться
-        # форматом (например, "30 " / "30.0"), но остальные поля совпадают.
-        if not product and article_val:
-            relaxed_filters = [
-                _norm_text(Product.article) == article_val,
-            ]
-            if legal_entity_val:
-                relaxed_filters.append(_norm_text(Product.legal_entity) == legal_entity_val)
-            if brand_val:
-                relaxed_filters.append(_norm_text(Product.brand) == brand_val)
-            if country_val:
-                relaxed_filters.append(_norm_text(Product.country) == country_val)
-            if color_val:
-                relaxed_filters.append(_norm_text(Product.color) == color_val)
-            if tnved_val:
-                relaxed_filters.append(_norm_text(Product.tnved_code) == tnved_val)
-            result = await db.execute(select(Product).where(*relaxed_filters))
-            relaxed_candidates = result.scalars().all()
-            if len(relaxed_candidates) == 1:
-                product = relaxed_candidates[0]
-
-        # 8) Абсолютный fallback: чтобы не терять product_id/GTIN в заявке.
-        # Берём наиболее "полезного" кандидата: сначала с GTIN, затем самый новый (id DESC).
-        if not product:
-            final_candidates = list(candidates)
-            if not final_candidates and article_val:
-                result = await db.execute(
-                    select(Product).where(_norm_text(Product.article) == article_val)
-                )
-                final_candidates = result.scalars().all()
-            if final_candidates:
-                final_candidates.sort(
-                    key=lambda p: (
-                        1 if str(getattr(p, "gtin", "") or "").strip() else 0,
-                        int(getattr(p, "id", 0) or 0),
-                    ),
-                    reverse=True,
-                )
-                product = final_candidates[0]
+        # ВАЖНО: НЕ делаем fallback, который игнорирует размер.
+        # Если точного (или достаточно строгого) совпадения нет — создаём позицию как "новый товар"
+        # без product_id. Это безопаснее, чем подставлять чужой GTIN/бренд/страну и получать
+        # критически неверный файл МаркЗнак (как в кейсе, когда все строки "схлопываются" в один размер).
 
         items.append(_order_item_create_from_template_row(r, product))
 
